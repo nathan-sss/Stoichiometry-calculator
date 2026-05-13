@@ -307,9 +307,6 @@ with st.sidebar:
         key="active_tab",
         label_visibility="collapsed",
     )
-    st.divider()
-    st.caption("Built for ceramic lab work. Edit `data.py` to expand defaults.")
-
 
 # ============================================================
 # CALCULATOR TAB
