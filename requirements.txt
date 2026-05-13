@@ -1,0 +1,6 @@
+# Desktop app (main.py) + tests + .exe build.
+# All wheels are pure Python or pre-built — installs cleanly on Windows
+# without a C compiler.
+PySide6>=6.6
+pyinstaller>=6.0
+pytest>=7.0

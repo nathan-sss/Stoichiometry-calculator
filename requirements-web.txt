@@ -1,0 +1,6 @@
+# Streamlit web app (app.py) only.
+# Use this on macOS / Linux for `streamlit run app.py`.
+# NOT needed for the desktop .exe build — those deps (pyarrow, httptools)
+# require a C compiler on Windows and will fail to build there.
+streamlit>=1.32
+pandas>=2.0
