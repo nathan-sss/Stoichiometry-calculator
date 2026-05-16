@@ -107,6 +107,26 @@ st.markdown("""
     }
     .stat-sum-ok { color: #047857; font-weight: 600; }
     .stat-sum-off { color: #b45309; font-weight: 600; }
+
+    /* --- Periodic-table picker (rendered inside st.dialog) --- */
+    /* Streamlit's default button padding is too generous for the 18-column
+       grid: each cell ends up ~25 px wide and the element symbol wraps
+       vertically ("L" stacked above "i"). Make buttons inside the dialog
+       tight, monospace, and forbid wrapping. */
+    [data-testid="stDialog"] .stButton > button {
+        padding: 0.35em 0.1em !important;
+        min-width: 0 !important;
+        width: 100% !important;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace !important;
+    }
+    [data-testid="stDialog"] .stButton > button p {
+        white-space: nowrap !important;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace !important;
+        font-size: 0.95rem !important;
+        margin: 0 !important;
+        line-height: 1.1 !important;
+        font-weight: 600 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 

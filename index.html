@@ -3,6 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Discourage GitHub Pages / the browser from caching this shell page.
+         Combined with the auto-update script below, new deploys are picked
+         up on the next page open instead of requiring a manual hard refresh. -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>Perovskite Recipe Calculator</title>
     <!-- Warm up the CDN connection before stlite is parsed. -->
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
@@ -52,6 +58,43 @@
     </style>
   </head>
   <body>
+    <!-- Auto-update detector: ask the server (bypassing cache) for the
+         current ETag/Last-Modified of this HTML. If it's different from what
+         we saw last time, force a fresh reload — no manual hard-refresh
+         needed. Runs at page open and every 5 minutes while the tab stays
+         open, so long-lived tabs also pick up new deploys. -->
+    <script>
+      (function () {
+        const KEY = "pkc_index_version";
+        async function checkForUpdate() {
+          try {
+            const r = await fetch(location.pathname, {
+              method: "HEAD",
+              cache: "no-store",
+            });
+            const v =
+              r.headers.get("etag") ||
+              r.headers.get("last-modified") ||
+              "";
+            const stored = localStorage.getItem(KEY);
+            if (stored && v && stored !== v) {
+              localStorage.setItem(KEY, v);
+              // Cache-bust query param forces a real network fetch, not the
+              // browser's cached copy of index.html.
+              location.replace(location.pathname + "?v=" + Date.now());
+              return;
+            }
+            if (v) localStorage.setItem(KEY, v);
+          } catch (e) {
+            /* offline / CORS / etc. — don't break the app */
+          }
+        }
+        checkForUpdate();
+        // Re-check every 5 minutes for long-running tabs.
+        setInterval(checkForUpdate, 5 * 60 * 1000);
+      })();
+    </script>
+
     <div id="root">
       <div class="stlite-loading">
         <div class="spinner"></div>
@@ -75,16 +118,21 @@
         try {
           await customElements.whenDefined("streamlit-app");
 
+          // cache: "no-cache" forces the browser to revalidate these files
+          // against GitHub Pages every load, so updates to app.py / data.py /
+          // calculator.py take effect immediately. Pyodide + Streamlit (the big
+          // downloads) are still cached normally — those URLs don't change.
+          const fetchOpts = { cache: "no-cache" };
           const [appPy, dataPy, calcPy] = await Promise.all([
-            fetch("./app.py").then((r) => {
+            fetch("./app.py", fetchOpts).then((r) => {
               if (!r.ok) throw new Error("Could not fetch app.py: " + r.status);
               return r.text();
             }),
-            fetch("./data.py").then((r) => {
+            fetch("./data.py", fetchOpts).then((r) => {
               if (!r.ok) throw new Error("Could not fetch data.py: " + r.status);
               return r.text();
             }),
-            fetch("./calculator.py").then((r) => {
+            fetch("./calculator.py", fetchOpts).then((r) => {
               if (!r.ok) throw new Error("Could not fetch calculator.py: " + r.status);
               return r.text();
             }),
