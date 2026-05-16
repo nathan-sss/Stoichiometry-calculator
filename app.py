@@ -12,7 +12,6 @@ from copy import deepcopy
 from datetime import datetime
 from io import StringIO
 
-import pandas as pd
 import streamlit as st
 
 from data import (
@@ -44,6 +43,44 @@ def normalize_formula(s: str) -> str:
     """Reverse of prettify_formula — turn Unicode subscript digits back to ASCII
     so storage and JSON serialization stay canonical."""
     return s.translate(_UNSUBSCRIPT_DIGITS)
+
+
+def render_html_table(rows: list[dict]) -> str:
+    """Build a plain HTML table from a list of row-dicts.
+
+    We must NOT hand a DataFrame to st.dataframe / st.table / st.data_editor
+    on the stlite web build: their Apache Arrow IPC pipeline is incompatible
+    with stlite's bundled Arrow decoder and throws "Parquet error: Repetition
+    level must be defined for a primitive type". Plain HTML sidesteps that
+    entire path. The result is non-interactive (no sort, no select) but
+    visually equivalent for a read-only result display."""
+    import html as _html
+    if not rows:
+        return ""
+    cols = list(rows[0].keys())
+    parts = [
+        '<div style="overflow-x:auto;margin:8px 0">',
+        '<table style="width:100%;border-collapse:collapse;font-size:0.95em">',
+        '<thead><tr style="background:#f1f5f9;text-align:left">',
+    ]
+    for c in cols:
+        parts.append(
+            f'<th style="padding:8px 10px;border:1px solid #e2e8f0;'
+            f'font-weight:600;color:#1e293b">{_html.escape(str(c))}</th>'
+        )
+    parts.append('</tr></thead><tbody>')
+    for row in rows:
+        parts.append('<tr>')
+        for c in cols:
+            v = row.get(c)
+            cell = "" if v is None else _html.escape(str(v))
+            parts.append(
+                f'<td style="padding:8px 10px;border:1px solid #e2e8f0;'
+                f'color:#334155">{cell}</td>'
+            )
+        parts.append('</tr>')
+    parts.append('</tbody></table></div>')
+    return "".join(parts)
 
 
 def download_link(label: str, data: str, filename: str, mime: str) -> None:
@@ -374,7 +411,7 @@ if tab_choice == "Calculator":
                     st.session_state.reagent_choice = {}
                     # Wipe stale EM widget keys so newly-loaded fractions take effect.
                     for k in list(st.session_state.keys()):
-                        if k.startswith("em_frac_") or k.startswith("em_name_"):
+                        if isinstance(k, str) and (k.startswith("em_frac_") or k.startswith("em_name_")):
                             del st.session_state[k]
                     st.rerun()
 
@@ -684,13 +721,13 @@ if tab_choice == "Calculator":
                 "Mass + excess (g)": round(r.mass_with_excess, 4),
                 ("w/ purity (g)" if st.session_state.apply_purity else "To weigh (g)"): round(r.mass_to_weigh, 4),
             })
-        # Use st.table instead of st.dataframe — st.dataframe serializes via
-        # Apache Arrow IPC, and stlite's bundled Arrow decoder is incompatible
-        # with Streamlit's bundled Arrow encoder (you get "Parquet error:
-        # Repetition level must be defined for a primitive type" on the web
-        # build). st.table renders plain HTML, sidesteps Arrow entirely.
-        df = pd.DataFrame(rows_data)
-        st.table(df)
+        # Render the table as raw HTML, NOT via st.dataframe / st.table /
+        # st.data_editor. All three of those serialize through Apache Arrow
+        # IPC, which is broken on the stlite web build ("Parquet error:
+        # Repetition level must be defined for a primitive type"). See
+        # render_html_table() for the rationale.
+        if rows_data:
+            st.markdown(render_html_table(rows_data), unsafe_allow_html=True)
 
         st.caption(
             f"Oxygen contributes {result.oxygen_coeff:.3f} atoms × 15.999 = "
@@ -760,49 +797,90 @@ elif tab_choice == "Raw Materials":
     st.title("📚 Raw materials database")
     st.caption("Add or edit the precursors your lab uses.")
 
-    # Editable table — names display with subscripts, normalized to ASCII on save.
-    # pandas DataFrame required: data_editor uses the same Arrow IPC pipeline
-    # as st.dataframe, which fails schema inference on a plain list of dicts.
-    reagent_dicts = []
-    for r in st.session_state.reagents:
-        d = r.to_dict()
-        d["name"] = prettify_formula(d["name"])
-        reagent_dicts.append(d)
-    df = pd.DataFrame(reagent_dicts)
-    edited = st.data_editor(
-        df,
-        num_rows="dynamic",
-        column_config={
-            "name": st.column_config.TextColumn("Name", help="e.g. Na2CO3 (you can type ASCII or Unicode subscripts)"),
-            "element": st.column_config.TextColumn("Element", help="Element supplied (e.g. Na)"),
-            "atoms": st.column_config.NumberColumn("Atoms", help="Atoms of element per reagent formula unit",
-                                                    step=1, min_value=1),
-            "mw": st.column_config.NumberColumn("MW (g/mol)", format="%.4f", min_value=0.0),
-            "purity": st.column_config.NumberColumn("Purity %", format="%.3f", min_value=0.0, max_value=100.0),
-            "notes": st.column_config.TextColumn("Notes", help="Supplier, LOI behaviour, storage"),
-        },
-        use_container_width=True,
-        hide_index=True,
-        key="reagents_editor",
+    # Manual edit form. We can't use st.data_editor here: it routes through
+    # the same broken Apache Arrow pipeline as st.dataframe under stlite,
+    # giving the same "Parquet error" crash. Rendering each cell as a plain
+    # widget bypasses Arrow entirely.
+    st.caption(
+        "Names display with subscripts; type ASCII (e.g. `Na2CO3`) or "
+        "Unicode (e.g. `Na₂CO₃`) — both are accepted. "
+        "Click **Apply changes** when done."
     )
 
-    if st.button("💾 Apply changes", type="primary"):
+    _RM_COL_WIDTHS = [3, 1.5, 1, 1.7, 1.4, 4, 0.7]
+    _RM_HEADERS = ["Name", "Element", "Atoms", "MW (g/mol)", "Purity %", "Notes", ""]
+    hc = st.columns(_RM_COL_WIDTHS)
+    for header, col in zip(_RM_HEADERS, hc):
+        col.markdown(f"**{header}**" if header else "")
+
+    to_delete = None
+    for i, r in enumerate(st.session_state.reagents):
+        cc = st.columns(_RM_COL_WIDTHS)
+        cc[0].text_input(
+            "Name", value=prettify_formula(r.name),
+            key=f"rm_name_{i}", label_visibility="collapsed",
+        )
+        cc[1].text_input(
+            "Element", value=r.element,
+            key=f"rm_el_{i}", label_visibility="collapsed",
+        )
+        cc[2].number_input(
+            "Atoms", value=int(r.atoms), min_value=1, step=1,
+            key=f"rm_atoms_{i}", label_visibility="collapsed",
+        )
+        cc[3].number_input(
+            "MW", value=float(r.mw), min_value=0.0, step=0.01, format="%.4f",
+            key=f"rm_mw_{i}", label_visibility="collapsed",
+        )
+        cc[4].number_input(
+            "Purity", value=float(r.purity), min_value=0.0, max_value=100.0,
+            step=0.1, format="%.3f",
+            key=f"rm_pur_{i}", label_visibility="collapsed",
+        )
+        cc[5].text_input(
+            "Notes", value=r.notes or "",
+            key=f"rm_notes_{i}", label_visibility="collapsed",
+        )
+        if cc[6].button("✕", key=f"rm_del_{i}", help="Delete this row"):
+            to_delete = i
+
+    def _clear_rm_widget_keys():
+        """Wipe all rm_* widget keys so the next render re-syncs from
+        st.session_state.reagents instead of stale per-index widget state."""
+        for k in list(st.session_state.keys()):
+            if isinstance(k, str) and k.startswith("rm_"):
+                del st.session_state[k]
+
+    if to_delete is not None:
+        del st.session_state.reagents[to_delete]
+        _clear_rm_widget_keys()
+        st.rerun()
+
+    st.divider()
+    bc = st.columns([1, 1, 4])
+    if bc[0].button("➕ Add reagent"):
+        st.session_state.reagents.append(Reagent("New", "X", 1, 0.0, 99.9, ""))
+        st.rerun()
+    if bc[1].button("💾 Apply changes", type="primary"):
         new_reagents = []
-        for _, row in edited.iterrows():
+        for i in range(len(st.session_state.reagents)):
             try:
-                if pd.isna(row.get("name")) or pd.isna(row.get("element")):
+                name = (st.session_state.get(f"rm_name_{i}") or "").strip()
+                element = (st.session_state.get(f"rm_el_{i}") or "").strip()
+                if not name or not element:
                     continue
                 new_reagents.append(Reagent(
-                    name=normalize_formula(str(row["name"])).strip(),
-                    element=normalize_formula(str(row["element"])).strip(),
-                    atoms=int(row["atoms"]),
-                    mw=float(row["mw"]),
-                    purity=float(row["purity"]),
-                    notes=str(row.get("notes", "") or ""),
+                    name=normalize_formula(name),
+                    element=normalize_formula(element),
+                    atoms=int(st.session_state.get(f"rm_atoms_{i}", 1) or 1),
+                    mw=float(st.session_state.get(f"rm_mw_{i}", 0.0) or 0.0),
+                    purity=float(st.session_state.get(f"rm_pur_{i}", 99.9) or 99.9),
+                    notes=str(st.session_state.get(f"rm_notes_{i}", "") or ""),
                 ))
-            except (ValueError, TypeError, KeyError):
+            except (ValueError, TypeError):
                 continue
         st.session_state.reagents = new_reagents
+        _clear_rm_widget_keys()
         st.success(f"Updated database: {len(new_reagents)} reagents")
         st.rerun()
 
@@ -864,7 +942,7 @@ elif tab_choice == "Saved Recipes":
                         st.session_state.apply_purity = recipe.get("apply_purity", True)
                         # Clear stale EM widget keys so new fractions render correctly.
                         for k in list(st.session_state.keys()):
-                            if k.startswith("em_frac_") or k.startswith("em_name_"):
+                            if isinstance(k, str) and (k.startswith("em_frac_") or k.startswith("em_name_")):
                                 del st.session_state[k]
                         st.session_state.active_tab = "Calculator"
                         st.rerun()
