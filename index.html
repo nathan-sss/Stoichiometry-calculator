@@ -40,9 +40,9 @@
       <app-file name="app.py" url="./app.py" entrypoint></app-file>
       <app-file name="data.py" url="./data.py"></app-file>
       <app-file name="calculator.py" url="./calculator.py"></app-file>
-      <app-requirements>
-        pandas
-      </app-requirements>
+      <!-- No extra requirements: dropped pandas to shrink first-load by ~10 MB.
+           Streamlit itself is bundled by stlite. -->
+      <app-requirements></app-requirements>
 
       <!-- Shown while Pyodide + Streamlit + pandas download (first load only). -->
       <div slot="fallback" class="stlite-loading">

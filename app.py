@@ -12,7 +12,6 @@ from datetime import datetime
 from io import StringIO
 
 import streamlit as st
-import pandas as pd
 
 from data import (
     ATOMIC_WEIGHTS, A_SITE_CATIONS, B_SITE_CATIONS,
@@ -632,8 +631,7 @@ if tab_choice == "Calculator":
                 "Mass + excess (g)": round(r.mass_with_excess, 4),
                 ("w/ purity (g)" if st.session_state.apply_purity else "To weigh (g)"): round(r.mass_to_weigh, 4),
             })
-        df = pd.DataFrame(rows_data)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(rows_data, use_container_width=True, hide_index=True)
 
         st.caption(
             f"Oxygen contributes {result.oxygen_coeff:.3f} atoms × 15.999 = "
@@ -702,15 +700,16 @@ elif tab_choice == "Raw Materials":
     st.title("📚 Raw materials database")
     st.caption("Add or edit the precursors your lab uses.")
 
-    # Editable dataframe — names display with subscripts, normalized to ASCII on save.
+    # Editable table — names display with subscripts, normalized to ASCII on save.
+    # Streamlit's data_editor accepts a plain list of dicts (no pandas needed),
+    # which keeps the stlite/WebAssembly bundle smaller.
     reagent_dicts = []
     for r in st.session_state.reagents:
         d = r.to_dict()
         d["name"] = prettify_formula(d["name"])
         reagent_dicts.append(d)
-    df = pd.DataFrame(reagent_dicts)
     edited = st.data_editor(
-        df,
+        reagent_dicts,
         num_rows="dynamic",
         column_config={
             "name": st.column_config.TextColumn("Name", help="e.g. Na2CO3 (you can type ASCII or Unicode subscripts)"),
@@ -728,19 +727,21 @@ elif tab_choice == "Raw Materials":
 
     if st.button("💾 Apply changes", type="primary"):
         new_reagents = []
-        for _, row in edited.iterrows():
+        for row in edited:
             try:
-                if pd.isna(row.get("name")) or pd.isna(row.get("element")):
+                name = row.get("name")
+                element = row.get("element")
+                if not name or not element:
                     continue
                 new_reagents.append(Reagent(
-                    name=normalize_formula(str(row["name"])).strip(),
-                    element=normalize_formula(str(row["element"])).strip(),
+                    name=normalize_formula(str(name)).strip(),
+                    element=normalize_formula(str(element)).strip(),
                     atoms=int(row["atoms"]),
                     mw=float(row["mw"]),
                     purity=float(row["purity"]),
                     notes=str(row.get("notes", "") or ""),
                 ))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, KeyError):
                 continue
         st.session_state.reagents = new_reagents
         st.success(f"Updated database: {len(new_reagents)} reagents")
