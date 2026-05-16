@@ -58,43 +58,6 @@
     </style>
   </head>
   <body>
-    <!-- Auto-update detector: ask the server (bypassing cache) for the
-         current ETag/Last-Modified of this HTML. If it's different from what
-         we saw last time, force a fresh reload — no manual hard-refresh
-         needed. Runs at page open and every 5 minutes while the tab stays
-         open, so long-lived tabs also pick up new deploys. -->
-    <script>
-      (function () {
-        const KEY = "pkc_index_version";
-        async function checkForUpdate() {
-          try {
-            const r = await fetch(location.pathname, {
-              method: "HEAD",
-              cache: "no-store",
-            });
-            const v =
-              r.headers.get("etag") ||
-              r.headers.get("last-modified") ||
-              "";
-            const stored = localStorage.getItem(KEY);
-            if (stored && v && stored !== v) {
-              localStorage.setItem(KEY, v);
-              // Cache-bust query param forces a real network fetch, not the
-              // browser's cached copy of index.html.
-              location.replace(location.pathname + "?v=" + Date.now());
-              return;
-            }
-            if (v) localStorage.setItem(KEY, v);
-          } catch (e) {
-            /* offline / CORS / etc. — don't break the app */
-          }
-        }
-        checkForUpdate();
-        // Re-check every 5 minutes for long-running tabs.
-        setInterval(checkForUpdate, 5 * 60 * 1000);
-      })();
-    </script>
-
     <div id="root">
       <div class="stlite-loading">
         <div class="spinner"></div>

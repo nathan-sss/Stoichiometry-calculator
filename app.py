@@ -414,12 +414,24 @@ if tab_choice == "Calculator":
                         st.session_state.end_members[idx].name = new_name
                 with c2:
                     is_dominant = (idx == 0)
-                    label = "Mole fraction (auto = 1 − Σ others)" if is_dominant else "Mole fraction"
-                    new_frac = st.number_input(label, value=float(em.fraction), step=0.01,
-                                                format="%.4f", key=f"em_frac_{idx}",
-                                                disabled=is_dominant)
-                    if not is_dominant and new_frac != em.fraction:
-                        st.session_state.end_members[idx].fraction = new_frac
+                    if is_dominant:
+                        # sync_dominant_fraction() pre-populates
+                        # st.session_state["em_frac_0"]. Streamlit forbids
+                        # combining a Session State pre-set with a value=
+                        # argument, so we deliberately omit value= here.
+                        st.number_input(
+                            "Mole fraction (auto = 1 − Σ others)",
+                            step=0.01, format="%.4f",
+                            key=f"em_frac_{idx}", disabled=True,
+                        )
+                    else:
+                        new_frac = st.number_input(
+                            "Mole fraction", value=float(em.fraction),
+                            step=0.01, format="%.4f",
+                            key=f"em_frac_{idx}",
+                        )
+                        if new_frac != em.fraction:
+                            st.session_state.end_members[idx].fraction = new_frac
                 with c3:
                     st.markdown("&nbsp;", unsafe_allow_html=True)  # spacer
                     # First end-member is the base — can't be removed.
@@ -672,12 +684,13 @@ if tab_choice == "Calculator":
                 "Mass + excess (g)": round(r.mass_with_excess, 4),
                 ("w/ purity (g)" if st.session_state.apply_purity else "To weigh (g)"): round(r.mass_to_weigh, 4),
             })
-        # Note: pandas DataFrame is required here (not a plain list of dicts).
-        # Streamlit converts dataframes to Apache Arrow IPC bytes for the frontend;
-        # without pandas, the schema inference fails with
-        # "Parquet error: Repetition level must be defined for a primitive type".
+        # Use st.table instead of st.dataframe — st.dataframe serializes via
+        # Apache Arrow IPC, and stlite's bundled Arrow decoder is incompatible
+        # with Streamlit's bundled Arrow encoder (you get "Parquet error:
+        # Repetition level must be defined for a primitive type" on the web
+        # build). st.table renders plain HTML, sidesteps Arrow entirely.
         df = pd.DataFrame(rows_data)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.table(df)
 
         st.caption(
             f"Oxygen contributes {result.oxygen_coeff:.3f} atoms × 15.999 = "
