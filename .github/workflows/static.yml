@@ -21,6 +21,11 @@ concurrency:
   group: "pages"
   cancel-in-progress: false
 
+# Silence the Node.js 20 deprecation warning by opting into Node 24 today.
+# GitHub flips this to the default on 2026-06-02; remove this block after that date.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   # Single deploy job since we're just deploying
   deploy:
