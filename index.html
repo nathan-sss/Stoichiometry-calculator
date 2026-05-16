@@ -9,56 +9,62 @@
     <link rel="dns-prefetch" href="https://cdn.jsdelivr.net" />
     <link
       rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/@stlite/browser@0.83.0/build/stlite.css"
+      href="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.76.0/build/stlite.css"
     />
     <style>
       html, body { margin: 0; padding: 0; height: 100%; }
-      streamlit-app { display: block; height: 100vh; }
+      #root { display: flex; flex-direction: column; height: 100vh; }
       .stlite-loading {
         font-family: system-ui, -apple-system, sans-serif;
         text-align: center;
         padding: 40px 20px;
         color: #475569;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
       }
       .stlite-loading h2 { color: #1e293b; margin-bottom: 8px; }
       .stlite-loading p  { margin: 4px 0; }
       .stlite-loading .spinner {
         display: inline-block;
-        width: 24px; height: 24px;
+        width: 32px; height: 32px;
         border: 3px solid #e2e8f0;
         border-top-color: #4f46e5;
         border-radius: 50%;
         animation: spin 0.8s linear infinite;
-        margin-bottom: 12px;
+        margin-bottom: 16px;
       }
       @keyframes spin { to { transform: rotate(360deg); } }
     </style>
   </head>
   <body>
-    <streamlit-app>
-      <!--
-        First <app-file> with `entrypoint` is the script stlite runs.
-        Additional files are fetched alongside.
-      -->
-      <app-file name="app.py" url="./app.py" entrypoint></app-file>
-      <app-file name="data.py" url="./data.py"></app-file>
-      <app-file name="calculator.py" url="./calculator.py"></app-file>
-      <!-- No extra requirements: dropped pandas to shrink first-load by ~10 MB.
-           Streamlit itself is bundled by stlite. -->
-      <app-requirements></app-requirements>
-
-      <!-- Shown while Pyodide + Streamlit download (first load only). -->
-      <div slot="fallback" class="stlite-loading">
+    <div id="root">
+      <!-- Replaced by Streamlit once stlite.mount() completes. -->
+      <div class="stlite-loading">
         <div class="spinner"></div>
         <h2>Loading the Perovskite Recipe Calculator…</h2>
         <p>First visit downloads Python + Streamlit into your browser (~15–25 s).</p>
         <p>Subsequent visits are instant — everything is cached locally.</p>
       </div>
-    </streamlit-app>
-
-    <script
-      type="module"
-      src="https://cdn.jsdelivr.net/npm/@stlite/browser@0.83.0/build/stlite.js"
-    ></script>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.76.0/build/stlite.js"></script>
+    <script>
+      stlite.mount(
+        {
+          entrypoint: "app.py",
+          files: {
+            "app.py":        { url: "./app.py" },
+            "data.py":       { url: "./data.py" },
+            "calculator.py": { url: "./calculator.py" },
+          },
+          // No PyPI packages required — Streamlit itself is bundled by stlite,
+          // and we removed pandas to shrink the first-load.
+          requirements: [],
+        },
+        document.getElementById("root")
+      );
+    </script>
   </body>
 </html>
