@@ -146,23 +146,59 @@ st.markdown("""
     .stat-sum-off { color: #b45309; font-weight: 600; }
 
     /* --- Periodic-table picker (rendered inside st.dialog) --- */
-    /* Streamlit's default button padding is too generous for the 18-column
-       grid: each cell ends up ~25 px wide and the element symbol wraps
-       vertically ("L" stacked above "i"). Make buttons inside the dialog
-       tight, monospace, and forbid wrapping. */
-    [data-testid="stDialog"] .stButton > button {
-        padding: 0.35em 0.1em !important;
+    /* The stlite-bundled Streamlit may use different testid attributes than
+       the latest, so we target multiple variants: data-testid stDialog/
+       stModal, ARIA role=dialog, and rely on universal selectors below. */
+    [data-testid="stDialog"] button,
+    [data-testid="stModal"] button,
+    section[role="dialog"] button,
+    div[role="dialog"] button {
+        padding: 4px 2px !important;
         min-width: 0 !important;
         width: 100% !important;
-        font-family: ui-monospace, "SF Mono", Menlo, monospace !important;
-    }
-    [data-testid="stDialog"] .stButton > button p {
+        height: auto !important;
+        min-height: 32px !important;
         white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: clip !important;
+        word-break: keep-all !important;
         font-family: ui-monospace, "SF Mono", Menlo, monospace !important;
-        font-size: 0.95rem !important;
-        margin: 0 !important;
-        line-height: 1.1 !important;
         font-weight: 600 !important;
+        line-height: 1 !important;
+        /* Force a row-flow layout — Streamlit's default
+           "display: flex; flex-direction: column" on buttons stacks each
+           label element vertically, which is why "Li" became "L\ni". */
+        display: inline-flex !important;
+        flex-direction: row !important;
+        align-items: center !important;
+        justify-content: center !important;
+    }
+    /* Streamlit wraps the button label in <div data-testid="stMarkdownContainer">
+       containing a <p> element. Both need to forbid wrapping. */
+    [data-testid="stDialog"] button *,
+    [data-testid="stModal"] button *,
+    section[role="dialog"] button *,
+    div[role="dialog"] button * {
+        white-space: nowrap !important;
+        word-break: keep-all !important;
+        overflow: hidden !important;
+        margin: 0 !important;
+        line-height: 1 !important;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace !important;
+        font-size: 0.85rem !important;
+    }
+    /* Tighten columns inside the dialog so the 18-wide grid has more room. */
+    [data-testid="stDialog"] [data-testid="stColumn"],
+    [data-testid="stDialog"] [data-testid="column"],
+    section[role="dialog"] [data-testid="stColumn"],
+    div[role="dialog"] [data-testid="stColumn"] {
+        padding: 0 1px !important;
+        min-width: 0 !important;
+    }
+    [data-testid="stDialog"] [data-testid="stHorizontalBlock"],
+    section[role="dialog"] [data-testid="stHorizontalBlock"],
+    div[role="dialog"] [data-testid="stHorizontalBlock"] {
+        gap: 1px !important;
     }
 </style>
 """, unsafe_allow_html=True)
