@@ -4,6 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Perovskite Recipe Calculator</title>
+    <!-- Speed up first load: warm up the CDN connection before stlite is parsed. -->
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+    <link rel="dns-prefetch" href="https://cdn.jsdelivr.net" />
     <link
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/@stlite/browser@0.83.0/build/stlite.css"
@@ -44,12 +47,12 @@
            Streamlit itself is bundled by stlite. -->
       <app-requirements></app-requirements>
 
-      <!-- Shown while Pyodide + Streamlit + pandas download (first load only). -->
+      <!-- Shown while Pyodide + Streamlit download (first load only). -->
       <div slot="fallback" class="stlite-loading">
         <div class="spinner"></div>
         <h2>Loading the Perovskite Recipe Calculator…</h2>
-        <p>First visit downloads Python + Streamlit into your browser (~30 s).</p>
-        <p>Subsequent visits are instant — everything is cached.</p>
+        <p>First visit downloads Python + Streamlit into your browser (~15–25 s).</p>
+        <p>Subsequent visits are instant — everything is cached locally.</p>
       </div>
     </streamlit-app>
 
