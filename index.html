@@ -4,27 +4,28 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Perovskite Recipe Calculator</title>
-    <!-- Speed up first load: warm up the CDN connection before stlite is parsed. -->
+    <!-- Warm up the CDN connection before stlite is parsed. -->
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
     <link rel="dns-prefetch" href="https://cdn.jsdelivr.net" />
     <link
       rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.76.0/build/stlite.css"
+      href="https://cdn.jsdelivr.net/npm/@stlite/browser@0.83.0/build/stlite.css"
     />
     <style>
       html, body { margin: 0; padding: 0; height: 100%; }
       #root { display: flex; flex-direction: column; height: 100vh; }
-      .stlite-loading {
+      streamlit-app { display: block; flex: 1; }
+      .stlite-loading, .stlite-error {
         font-family: system-ui, -apple-system, sans-serif;
         text-align: center;
         padding: 40px 20px;
-        color: #475569;
         flex: 1;
         display: flex;
         flex-direction: column;
         justify-content: center;
         align-items: center;
       }
+      .stlite-loading { color: #475569; }
       .stlite-loading h2 { color: #1e293b; margin-bottom: 8px; }
       .stlite-loading p  { margin: 4px 0; }
       .stlite-loading .spinner {
@@ -37,11 +38,21 @@
         margin-bottom: 16px;
       }
       @keyframes spin { to { transform: rotate(360deg); } }
+      .stlite-error {
+        color: #991b1b; background: #fef2f2;
+        border: 1px solid #fecaca; border-radius: 8px;
+        max-width: 700px; margin: 40px auto; text-align: left;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px;
+        white-space: pre-wrap; word-break: break-word;
+      }
+      .stlite-error h2 {
+        font-family: system-ui, -apple-system, sans-serif;
+        color: #7f1d1d; margin: 0 0 12px 0;
+      }
     </style>
   </head>
   <body>
     <div id="root">
-      <!-- Replaced by Streamlit once stlite.mount() completes. -->
       <div class="stlite-loading">
         <div class="spinner"></div>
         <h2>Loading the Perovskite Recipe Calculator…</h2>
@@ -49,22 +60,69 @@
         <p>Subsequent visits are instant — everything is cached locally.</p>
       </div>
     </div>
-    <script src="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.76.0/build/stlite.js"></script>
-    <script>
-      stlite.mount(
-        {
-          entrypoint: "app.py",
-          files: {
-            "app.py":        { url: "./app.py" },
-            "data.py":       { url: "./data.py" },
-            "calculator.py": { url: "./calculator.py" },
-          },
-          // No PyPI packages required — Streamlit itself is bundled by stlite,
-          // and we removed pandas to shrink the first-load.
-          requirements: [],
-        },
-        document.getElementById("root")
-      );
+
+    <!-- stlite's runtime; registers <streamlit-app> as a custom element. -->
+    <script
+      type="module"
+      src="https://cdn.jsdelivr.net/npm/@stlite/browser@0.83.0/build/stlite.js"
+    ></script>
+
+    <script type="module">
+      // Wait for stlite to register its custom element, fetch our Python
+      // source files, then construct <streamlit-app> with inline content.
+      // Sidesteps any url=/src= attribute confusion — text content always works.
+      async function start() {
+        try {
+          await customElements.whenDefined("streamlit-app");
+
+          const [appPy, dataPy, calcPy] = await Promise.all([
+            fetch("./app.py").then((r) => {
+              if (!r.ok) throw new Error("Could not fetch app.py: " + r.status);
+              return r.text();
+            }),
+            fetch("./data.py").then((r) => {
+              if (!r.ok) throw new Error("Could not fetch data.py: " + r.status);
+              return r.text();
+            }),
+            fetch("./calculator.py").then((r) => {
+              if (!r.ok) throw new Error("Could not fetch calculator.py: " + r.status);
+              return r.text();
+            }),
+          ]);
+
+          const streamlitApp = document.createElement("streamlit-app");
+
+          for (const [name, content, isEntry] of [
+            ["app.py", appPy, true],
+            ["data.py", dataPy, false],
+            ["calculator.py", calcPy, false],
+          ]) {
+            const f = document.createElement("app-file");
+            f.setAttribute("name", name);
+            if (isEntry) f.setAttribute("entrypoint", "");
+            f.textContent = content;
+            streamlitApp.appendChild(f);
+          }
+
+          const root = document.getElementById("root");
+          root.replaceChildren(streamlitApp);
+        } catch (err) {
+          const root = document.getElementById("root");
+          root.innerHTML = "";
+          const box = document.createElement("div");
+          box.className = "stlite-error";
+          const h = document.createElement("h2");
+          h.textContent = "Failed to start the calculator";
+          box.appendChild(h);
+          const msg = document.createElement("pre");
+          msg.textContent =
+            (err && err.stack) ? err.stack : String(err);
+          box.appendChild(msg);
+          root.appendChild(box);
+          console.error(err);
+        }
+      }
+      start();
     </script>
   </body>
 </html>
