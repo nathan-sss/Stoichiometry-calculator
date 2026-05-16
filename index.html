@@ -56,7 +56,7 @@
       <div class="stlite-loading">
         <div class="spinner"></div>
         <h2>Loading the Perovskite Recipe Calculator…</h2>
-        <p>First visit downloads Python + Streamlit into your browser (~15–25 s).</p>
+        <p>First visit downloads Python + Streamlit + pandas into your browser (~25–40 s).</p>
         <p>Subsequent visits are instant — everything is cached locally.</p>
       </div>
     </div>
@@ -91,6 +91,14 @@
           ]);
 
           const streamlitApp = document.createElement("streamlit-app");
+
+          // pandas is required: Streamlit's st.dataframe / st.data_editor
+          // serialize via Apache Arrow IPC, and the conversion fails on plain
+          // list-of-dicts inputs with "Parquet error: Repetition level must
+          // be defined for a primitive type" without pandas.
+          const reqs = document.createElement("app-requirements");
+          reqs.textContent = "pandas";
+          streamlitApp.appendChild(reqs);
 
           for (const [name, content, isEntry] of [
             ["app.py", appPy, true],

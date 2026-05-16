@@ -4,6 +4,7 @@ Run with:  streamlit run app.py
 """
 
 from __future__ import annotations
+import base64
 import csv
 import json
 import re
@@ -11,6 +12,7 @@ from copy import deepcopy
 from datetime import datetime
 from io import StringIO
 
+import pandas as pd
 import streamlit as st
 
 from data import (
@@ -42,6 +44,25 @@ def normalize_formula(s: str) -> str:
     """Reverse of prettify_formula — turn Unicode subscript digits back to ASCII
     so storage and JSON serialization stay canonical."""
     return s.translate(_UNSUBSCRIPT_DIGITS)
+
+
+def download_link(label: str, data: str, filename: str, mime: str) -> None:
+    """Render a download link that works in both local Streamlit and stlite/GitHub Pages.
+
+    Streamlit's native st.download_button generates a /media/<hash>.<ext> URL
+    served by the Streamlit server — that pattern 404s under stlite when
+    deployed on GitHub Pages (service-worker scope can't cover a subpath
+    deployment). A data: URL is fully browser-handled and works everywhere."""
+    b64 = base64.b64encode(data.encode("utf-8")).decode("ascii")
+    href = f"data:{mime};base64,{b64}"
+    st.markdown(
+        f'<a href="{href}" download="{filename}" '
+        f'style="display:inline-block;padding:0.4em 0.9em;'
+        f'background:#4f46e5;color:white;border-radius:6px;'
+        f'text-decoration:none;font-weight:600;font-size:0.9em">'
+        f'{label}</a>',
+        unsafe_allow_html=True,
+    )
 
 
 # ---------- Page setup ----------
@@ -631,7 +652,12 @@ if tab_choice == "Calculator":
                 "Mass + excess (g)": round(r.mass_with_excess, 4),
                 ("w/ purity (g)" if st.session_state.apply_purity else "To weigh (g)"): round(r.mass_to_weigh, 4),
             })
-        st.dataframe(rows_data, use_container_width=True, hide_index=True)
+        # Note: pandas DataFrame is required here (not a plain list of dicts).
+        # Streamlit converts dataframes to Apache Arrow IPC bytes for the frontend;
+        # without pandas, the schema inference fails with
+        # "Parquet error: Repetition level must be defined for a primitive type".
+        df = pd.DataFrame(rows_data)
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
         st.caption(
             f"Oxygen contributes {result.oxygen_coeff:.3f} atoms × 15.999 = "
@@ -685,11 +711,12 @@ if tab_choice == "Calculator":
                             r.reagent.purity if r.reagent else "",
                             f"{r.mass_target:.4f}", f"{r.mass_with_excess:.4f}",
                             f"{r.mass_to_weigh:.4f}"])
-            st.download_button("⬇️ Export CSV",
-                               data=buf.getvalue(),
-                               file_name=f"{recipe_name or 'recipe'}_{int(datetime.now().timestamp())}.csv",
-                               mime="text/csv",
-                               use_container_width=True)
+            download_link(
+                "⬇️ Export CSV",
+                data=buf.getvalue(),
+                filename=f"{recipe_name or 'recipe'}_{int(datetime.now().timestamp())}.csv",
+                mime="text/csv",
+            )
 
 
 # ============================================================
@@ -701,15 +728,16 @@ elif tab_choice == "Raw Materials":
     st.caption("Add or edit the precursors your lab uses.")
 
     # Editable table — names display with subscripts, normalized to ASCII on save.
-    # Streamlit's data_editor accepts a plain list of dicts (no pandas needed),
-    # which keeps the stlite/WebAssembly bundle smaller.
+    # pandas DataFrame required: data_editor uses the same Arrow IPC pipeline
+    # as st.dataframe, which fails schema inference on a plain list of dicts.
     reagent_dicts = []
     for r in st.session_state.reagents:
         d = r.to_dict()
         d["name"] = prettify_formula(d["name"])
         reagent_dicts.append(d)
+    df = pd.DataFrame(reagent_dicts)
     edited = st.data_editor(
-        reagent_dicts,
+        df,
         num_rows="dynamic",
         column_config={
             "name": st.column_config.TextColumn("Name", help="e.g. Na2CO3 (you can type ASCII or Unicode subscripts)"),
@@ -727,15 +755,13 @@ elif tab_choice == "Raw Materials":
 
     if st.button("💾 Apply changes", type="primary"):
         new_reagents = []
-        for row in edited:
+        for _, row in edited.iterrows():
             try:
-                name = row.get("name")
-                element = row.get("element")
-                if not name or not element:
+                if pd.isna(row.get("name")) or pd.isna(row.get("element")):
                     continue
                 new_reagents.append(Reagent(
-                    name=normalize_formula(str(name)).strip(),
-                    element=normalize_formula(str(element)).strip(),
+                    name=normalize_formula(str(row["name"])).strip(),
+                    element=normalize_formula(str(row["element"])).strip(),
                     atoms=int(row["atoms"]),
                     mw=float(row["mw"]),
                     purity=float(row["purity"]),
@@ -758,11 +784,12 @@ elif tab_choice == "Raw Materials":
     c1, c2 = st.columns(2)
     with c1:
         backup = json.dumps([r.to_dict() for r in st.session_state.reagents], indent=2)
-        st.download_button("⬇️ Download as JSON",
-                           data=backup,
-                           file_name=f"reagents_{int(datetime.now().timestamp())}.json",
-                           mime="application/json",
-                           use_container_width=True)
+        download_link(
+            "⬇️ Download as JSON",
+            data=backup,
+            filename=f"reagents_{int(datetime.now().timestamp())}.json",
+            mime="application/json",
+        )
     with c2:
         uploaded = st.file_uploader("Import reagents from JSON", type="json", key="reagents_upload")
         if uploaded is not None:
@@ -818,10 +845,12 @@ elif tab_choice == "Saved Recipes":
         st.divider()
         # Export all recipes as JSON
         all_json = json.dumps(st.session_state.saved_recipes, indent=2)
-        st.download_button("⬇️ Export all recipes as JSON",
-                           data=all_json,
-                           file_name=f"recipes_{int(datetime.now().timestamp())}.json",
-                           mime="application/json")
+        download_link(
+            "⬇️ Export all recipes as JSON",
+            data=all_json,
+            filename=f"recipes_{int(datetime.now().timestamp())}.json",
+            mime="application/json",
+        )
 
         uploaded = st.file_uploader("Import recipes from JSON", type="json", key="recipes_upload")
         if uploaded is not None:
