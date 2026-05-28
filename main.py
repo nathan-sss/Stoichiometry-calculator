@@ -15,16 +15,17 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox,
     QDialog, QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
-    QPushButton, QRadioButton, QScrollArea, QTableWidget, QTableWidgetItem,
+    QPushButton, QScrollArea, QTableWidget, QTableWidgetItem,
     QTabWidget, QVBoxLayout, QWidget,
 )
 
 from calculator import (
-    Dopant, EndMember, Reagent, build_composition_coeffs, calculate,
-    format_composition,
+    DopantEntry, EndMember, Reagent, build_composition_coeffs, calculate,
+    format_composition, dopant_entry_from_legacy_dict,
+    UNIT_MOL_PCT, UNIT_WT_PCT,
 )
 from data import (
     A_SITE_CATIONS, ATOMIC_WEIGHTS, B_SITE_CATIONS, DEFAULT_REAGENTS,
@@ -416,6 +417,7 @@ class MainWindow(QMainWindow):
         self.reagent_choice: dict[str, str] = {}
         self.excess_pct: dict[str, float] = {}
         self.end_member_cards: list[EndMemberCard] = []
+        self.dopants: list[DopantEntry] = []
         self.saved_recipes: list[dict] = []
         self._suppress = False
         self._current_reagent_sig: tuple | None = None
@@ -508,42 +510,38 @@ class MainWindow(QMainWindow):
         self.body_layout.addWidget(box)
 
     def _build_dopant(self):
-        box = QGroupBox("Dopant")
-        box.setCheckable(True)
-        box.setChecked(False)
-        self.dopant_box = box
-        h = QHBoxLayout(box)
-        h.addWidget(QLabel("Site:"))
-        self.dopant_site_a = QRadioButton("A")
-        self.dopant_site_b = QRadioButton("B")
-        self.dopant_site_a.setChecked(True)
-        bg = QButtonGroup(box)
-        bg.addButton(self.dopant_site_a)
-        bg.addButton(self.dopant_site_b)
-        h.addWidget(self.dopant_site_a)
-        h.addWidget(self.dopant_site_b)
-        h.addSpacing(20)
-        h.addWidget(QLabel("Cation:"))
-        self.dopant_cation = NoWheelComboBox()
-        self.dopant_cation.setEditable(True)
-        self.dopant_cation.addItems(ALL_ELEMENTS)
-        self.dopant_cation.setCurrentText("Ca")
-        h.addWidget(self.dopant_cation)
-        pick_btn = QPushButton("Pick from table…")
-        pick_btn.clicked.connect(self._pick_dopant_cation)
-        h.addWidget(pick_btn)
-        h.addSpacing(20)
-        h.addWidget(QLabel("Level (mol frac.):"))
-        self.dopant_level = make_spin(0.015, step=0.001, decimals=4, maximum=1.0)
-        h.addWidget(self.dopant_level)
-        h.addStretch(1)
+        box = QGroupBox("Dopants (added on top of the batch — not substituted)")
+        v = QVBoxLayout(box)
 
-        box.toggled.connect(self._recalculate)
-        self.dopant_site_a.toggled.connect(self._on_dopant_site_changed)
-        self.dopant_cation.activated.connect(self._recalculate)
-        self.dopant_cation.lineEdit().editingFinished.connect(self._recalculate)
-        self.dopant_level.valueChanged.connect(self._recalculate)
+        caption = QLabel(
+            "Each dopant is weighed in addition to the base batch. Use "
+            "<b>mol %</b> for excess of the cation relative to the formula-unit moles, "
+            "or <b>wt %</b> for percent of the base batch mass."
+        )
+        caption.setWordWrap(True)
+        caption.setStyleSheet("color: #64748b; font-size: 12px;")
+        v.addWidget(caption)
 
+        # Header row
+        head = QHBoxLayout()
+        for label, w in [("Cation", 70), ("Amount", 110), ("Unit", 110), ("", 32)]:
+            lbl = QLabel(f"<b>{label}</b>" if label else "")
+            lbl.setMinimumWidth(w)
+            head.addWidget(lbl)
+        head.addStretch(1)
+        v.addLayout(head)
+
+        self.dopant_rows_layout = QVBoxLayout()
+        v.addLayout(self.dopant_rows_layout)
+
+        btn_row = QHBoxLayout()
+        add_btn = QPushButton("+ Add dopant")
+        add_btn.clicked.connect(self._add_dopant_via_picker)
+        btn_row.addWidget(add_btn)
+        btn_row.addStretch(1)
+        v.addLayout(btn_row)
+
+        self._dopant_row_widgets: list[QWidget] = []
         self.body_layout.addWidget(box)
 
     def _build_batch_reagents(self):
@@ -588,13 +586,33 @@ class MainWindow(QMainWindow):
 
         self.results_table = QTableWidget(0, 10)
         self.results_table.setHorizontalHeaderLabels([
-            "Element", "Site", "At. wt", "Coeff", "Excess %",
+            "Element", "Site", "At. wt", "Coeff", "Excess (mol %)",
             "Reagent", "Reagent MW", "Purity %", "Target (g)", "To weigh (g)"
         ])
         self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.results_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.results_table.setMinimumHeight(180)
         v.addWidget(self.results_table)
+
+        # Add-on dopants table (hidden until any dopants are present)
+        self.dopants_section_label = QLabel(
+            "<b>Add-on dopants</b> (weighed in addition to the base batch)"
+        )
+        self.dopants_section_label.setStyleSheet("padding-top: 6px;")
+        self.dopants_section_label.setVisible(False)
+        v.addWidget(self.dopants_section_label)
+
+        self.dopants_table = QTableWidget(0, 8)
+        self.dopants_table.setHorizontalHeaderLabels([
+            "Cation", "Amount", "At. wt",
+            "Reagent", "Reagent MW", "Purity %",
+            "Mass (g)", "To weigh (g)",
+        ])
+        self.dopants_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.dopants_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.dopants_table.setMinimumHeight(80)
+        self.dopants_table.setVisible(False)
+        v.addWidget(self.dopants_table)
 
         self.oxygen_label = QLabel()
         self.oxygen_label.setStyleSheet("color: #64748b; font-size: 12px;")
@@ -629,7 +647,8 @@ class MainWindow(QMainWindow):
         self.end_member_cards.clear()
         for i, em_dict in enumerate(preset["end_members"]):
             self._add_end_member_card(EndMember.from_dict(em_dict), is_dominant=(i == 0))
-        self.dopant_box.setChecked(False)
+        self.dopants.clear()
+        self._rebuild_dopant_rows()
         self.excess_pct.clear()
         self.reagent_choice.clear()
         self._current_reagent_sig = None
@@ -680,22 +699,87 @@ class MainWindow(QMainWindow):
             first.frac_spin.blockSignals(False)
         self._recalculate()
 
-    def _on_dopant_site_changed(self, _checked: bool):
-        new_site = "A" if self.dopant_site_a.isChecked() else "B"
-        default = A_SITE_CATIONS[0] if new_site == "A" else B_SITE_CATIONS[0]
-        self.dopant_cation.blockSignals(True)
-        self.dopant_cation.setCurrentText(default)
-        self.dopant_cation.blockSignals(False)
-        self._recalculate()
+    def _base_cations_in_use(self) -> list[str]:
+        """All cations currently used in any end-member's A or B site."""
+        seen: set[str] = set()
+        for card in self.end_member_cards:
+            em = card.to_endmember()
+            seen.update(em.A.keys())
+            seen.update(em.B.keys())
+        return sorted(seen)
 
-    def _pick_dopant_cation(self):
-        site = "A" if self.dopant_site_a.isChecked() else "B"
-        current = self.dopant_cation.currentText().strip()
-        picked = PeriodicTablePicker.pick(self, site=site, selected=current)
+    def _add_dopant_via_picker(self):
+        # Exclude base composition cations and any already-added dopant.
+        excluded = self._base_cations_in_use() + [d.cation for d in self.dopants]
+        picked = PeriodicTablePicker.pick(self, site=None, excluded=excluded)
         if picked:
-            self.dopant_cation.setCurrentText(picked)
-            if not self.dopant_box.isChecked():
-                self.dopant_box.setChecked(True)
+            self.dopants.append(DopantEntry(cation=picked, amount=1.0, unit=UNIT_MOL_PCT))
+            self._rebuild_dopant_rows()
+            self._recalculate()
+
+    def _rebuild_dopant_rows(self):
+        """Clear and re-render the dopant rows from self.dopants."""
+        # Tear down previous widgets
+        while self.dopant_rows_layout.count():
+            item = self.dopant_rows_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self._dopant_row_widgets.clear()
+
+        for i, dop in enumerate(self.dopants):
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+
+            cation_lbl = QLabel(f"<b>{dop.cation}</b>")
+            cation_lbl.setMinimumWidth(70)
+            h.addWidget(cation_lbl)
+
+            amount_spin = make_spin(dop.amount, step=0.1, decimals=4,
+                                    minimum=0.0, maximum=100.0)
+            amount_spin.setMinimumWidth(110)
+            amount_spin.setMaximumWidth(110)
+            h.addWidget(amount_spin)
+
+            unit_combo = NoWheelComboBox()
+            unit_combo.addItem("mol %", userData=UNIT_MOL_PCT)
+            unit_combo.addItem("wt %", userData=UNIT_WT_PCT)
+            unit_combo.setCurrentIndex(0 if dop.unit == UNIT_MOL_PCT else 1)
+            unit_combo.setMinimumWidth(110)
+            unit_combo.setMaximumWidth(110)
+            h.addWidget(unit_combo)
+
+            remove_btn = QPushButton("✕")
+            remove_btn.setFixedWidth(32)
+            h.addWidget(remove_btn)
+            h.addStretch(1)
+
+            amount_spin.valueChanged.connect(
+                lambda v, idx=i: self._on_dopant_amount_changed(idx, v))
+            unit_combo.currentIndexChanged.connect(
+                lambda _i, idx=i, c=unit_combo: self._on_dopant_unit_changed(idx, c))
+            remove_btn.clicked.connect(lambda _c=False, idx=i: self._remove_dopant(idx))
+
+            self.dopant_rows_layout.addWidget(row)
+            self._dopant_row_widgets.append(row)
+
+    def _on_dopant_amount_changed(self, idx: int, value: float):
+        if 0 <= idx < len(self.dopants):
+            self.dopants[idx].amount = value
+            self._recalculate()
+
+    def _on_dopant_unit_changed(self, idx: int, combo: QComboBox):
+        if 0 <= idx < len(self.dopants):
+            unit = combo.currentData() or UNIT_MOL_PCT
+            self.dopants[idx].unit = unit
+            self._recalculate()
+
+    def _remove_dopant(self, idx: int):
+        if 0 <= idx < len(self.dopants):
+            del self.dopants[idx]
+            self._rebuild_dopant_rows()
             self._recalculate()
 
     # ----- state -----
@@ -703,13 +787,9 @@ class MainWindow(QMainWindow):
     def _current_endmembers(self) -> list[EndMember]:
         return [c.to_endmember() for c in self.end_member_cards]
 
-    def _current_dopant(self) -> Dopant:
-        return Dopant(
-            enabled=self.dopant_box.isChecked(),
-            site="A" if self.dopant_site_a.isChecked() else "B",
-            cation=self.dopant_cation.currentText().strip() or "Ca",
-            level=self.dopant_level.value(),
-        )
+    def _current_dopants(self) -> list[DopantEntry]:
+        return [DopantEntry(cation=d.cation, amount=d.amount, unit=d.unit)
+                for d in self.dopants]
 
     def _reagents_by_element(self) -> dict[str, Reagent]:
         out: dict[str, Reagent] = {}
@@ -725,10 +805,10 @@ class MainWindow(QMainWindow):
         if self._suppress:
             return
         end_members = self._current_endmembers()
-        dopant = self._current_dopant()
+        dopants = self._current_dopants()
 
         em_sum = sum(em.fraction for em in end_members)
-        a_coeffs, b_coeffs = build_composition_coeffs(end_members, dopant)
+        a_coeffs, b_coeffs = build_composition_coeffs(end_members)
         a_sum = sum(a_coeffs.values())
         b_sum = sum(b_coeffs.values())
 
@@ -749,9 +829,11 @@ class MainWindow(QMainWindow):
                 "or load a preset above.</i>"
             )
         else:
-            self.composition_preview.setText(prettify_formula(format_composition(end_members, dopant)))
+            self.composition_preview.setText(prettify_formula(format_composition(end_members, dopants)))
 
-        for el in elements:
+        # Dopant cations also need a reagent picked so their masses can be computed.
+        dopant_elements = sorted({d.cation for d in dopants if d.cation})
+        for el in elements + dopant_elements:
             current = self.reagent_choice.get(el)
             valid = any(r.name == current and r.element == el for r in self.reagents)
             if not valid:
@@ -766,25 +848,34 @@ class MainWindow(QMainWindow):
         result = calculate(
             batch_size_g=self.batch_spin.value(),
             end_members=end_members,
-            dopant=dopant,
+            dopants=dopants,
             reagents_by_element=self._reagents_by_element(),
             excess_percent=self.excess_pct,
             apply_purity=self.purity_cb.isChecked(),
         )
 
-        weigh_label = "Total w/ purity" if self.purity_cb.isChecked() else "To weigh"
         if not elements:
             self.mw_label.setText("Total MW: —")
             self.moles_label.setText("Moles: —")
-            self.mass_excess_label.setText("Total mass: —")
-            self.mass_weigh_label.setText(f"{weigh_label}: —")
+            self.mass_excess_label.setText("Base reagent: —")
+            self.mass_weigh_label.setText("Grand total: —")
             self.results_table.setRowCount(0)
+            self.dopants_table.setRowCount(0)
+            self.dopants_table.setVisible(False)
+            self.dopants_section_label.setVisible(False)
             self.oxygen_label.setText("")
         else:
+            base_label = "Base w/ purity" if self.purity_cb.isChecked() else "Base reagent"
             self.mw_label.setText(f"Total MW: {result.total_mw:.4f} g/mol")
             self.moles_label.setText(f"Moles: {result.moles:.4f}")
-            self.mass_excess_label.setText(f"Total mass: {result.total_mass_with_excess:.3f} g")
-            self.mass_weigh_label.setText(f"{weigh_label}: {result.total_mass_to_weigh:.3f} g")
+            self.mass_excess_label.setText(f"{base_label}: {result.total_mass_to_weigh:.3f} g")
+            if result.dopant_rows:
+                self.mass_weigh_label.setText(
+                    f"Grand total: {result.grand_total_to_weigh:.3f} g "
+                    f"(+{result.total_dopant_to_weigh:.3f} g dopant)"
+                )
+            else:
+                self.mass_weigh_label.setText(f"Grand total: {result.total_mass_to_weigh:.3f} g")
 
             self.results_table.setRowCount(len(result.rows))
             for i, r in enumerate(result.rows):
@@ -801,6 +892,30 @@ class MainWindow(QMainWindow):
                 for j, v in enumerate(vals):
                     self.results_table.setItem(i, j, QTableWidgetItem(str(v)))
 
+            # Add-on dopants table
+            if result.dopant_rows:
+                self.dopants_table.setVisible(True)
+                self.dopants_section_label.setVisible(True)
+                self.dopants_table.setRowCount(len(result.dopant_rows))
+                for i, d in enumerate(result.dopant_rows):
+                    unit_label = "wt %" if d.unit == UNIT_WT_PCT else "mol %"
+                    vals = [
+                        d.cation,
+                        f"{d.amount:.4g} {unit_label}",
+                        f"{d.atomic_weight:.3f}",
+                        prettify_formula(d.reagent.name) if d.reagent else "—",
+                        f"{d.reagent.mw:.2f}" if d.reagent else "",
+                        f"{d.reagent.purity:.2f}" if d.reagent else "",
+                        f"{d.mass:.4f}",
+                        f"{d.mass_to_weigh:.4f}",
+                    ]
+                    for j, v in enumerate(vals):
+                        self.dopants_table.setItem(i, j, QTableWidgetItem(str(v)))
+            else:
+                self.dopants_table.setRowCount(0)
+                self.dopants_table.setVisible(False)
+                self.dopants_section_label.setVisible(False)
+
             self.oxygen_label.setText(
                 f"Oxygen: {result.oxygen_coeff:.3f} atoms × 15.999 = "
                 f"{result.oxygen_mass:.4f} g/mol (supplied by reagents)."
@@ -808,7 +923,7 @@ class MainWindow(QMainWindow):
 
         self._last_result = result
         self._last_end_members = end_members
-        self._last_dopant = dopant
+        self._last_dopants = dopants
 
     def _rebuild_reagent_rows(self, elements: list[str],
                               a_coeffs: dict[str, float], b_coeffs: dict[str, float]):
@@ -887,14 +1002,14 @@ class MainWindow(QMainWindow):
                 r = self._last_result
                 w.writerow(["Recipe Export", datetime.now().isoformat()])
                 w.writerow(["Name", name])
-                w.writerow(["Composition", format_composition(self._last_end_members, self._last_dopant)])
+                w.writerow(["Composition", format_composition(self._last_end_members, self._last_dopants)])
                 w.writerow(["Batch size (g)", self.batch_spin.value()])
                 w.writerow(["Purity correction", "applied" if self.purity_cb.isChecked() else "not applied"])
                 w.writerow(["Total MW", f"{r.total_mw:.4f}"])
                 w.writerow(["Moles", f"{r.moles:.6f}"])
                 w.writerow([])
                 last_col = "Purity-corrected (g)" if self.purity_cb.isChecked() else "To weigh (g)"
-                w.writerow(["Element", "Site", "At wt", "Coeff", "Excess %",
+                w.writerow(["Element", "Site", "At wt", "Coeff", "Excess (mol %)",
                             "Reagent", "Reagent MW", "Purity %",
                             "Mass target (g)", "Mass + excess (g)", last_col])
                 for row in r.rows:
@@ -906,6 +1021,24 @@ class MainWindow(QMainWindow):
                                 row.reagent.purity if row.reagent else "",
                                 f"{row.mass_target:.4f}", f"{row.mass_with_excess:.4f}",
                                 f"{row.mass_to_weigh:.4f}"])
+                if r.dopant_rows:
+                    w.writerow([])
+                    w.writerow(["Add-on dopants (in addition to the base batch)"])
+                    w.writerow(["Cation", "Amount", "Unit", "At wt",
+                                "Reagent", "Reagent MW", "Purity %",
+                                "Mass (g)", last_col])
+                    for d in r.dopant_rows:
+                        unit_label = "wt %" if d.unit == UNIT_WT_PCT else "mol %"
+                        w.writerow([d.cation, f"{d.amount:.6f}", unit_label,
+                                    d.atomic_weight,
+                                    d.reagent.name if d.reagent else "",
+                                    d.reagent.mw if d.reagent else "",
+                                    d.reagent.purity if d.reagent else "",
+                                    f"{d.mass:.4f}", f"{d.mass_to_weigh:.4f}"])
+                    w.writerow([])
+                    w.writerow(["Base total to weigh (g)", f"{r.total_mass_to_weigh:.4f}"])
+                    w.writerow(["Dopant total to weigh (g)", f"{r.total_dopant_to_weigh:.4f}"])
+                    w.writerow(["Grand total to weigh (g)", f"{r.grand_total_to_weigh:.4f}"])
             QMessageBox.information(self, "Exported", f"Saved to:\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "Export failed", str(e))
@@ -1131,14 +1264,22 @@ class MainWindow(QMainWindow):
                 self.recipes_layout.addWidget(self._make_recipe_card(recipe))
         self.recipes_layout.addStretch(1)
 
+    @staticmethod
+    def _dopants_from_recipe(recipe: dict) -> list[DopantEntry]:
+        """Read dopants from either the new list format or the legacy single-dopant dict."""
+        if "dopants" in recipe and isinstance(recipe["dopants"], list):
+            return [DopantEntry.from_dict(d) for d in recipe["dopants"]]
+        legacy = dopant_entry_from_legacy_dict(recipe.get("dopant") or {})
+        return [legacy] if legacy is not None else []
+
     def _make_recipe_card(self, recipe: dict) -> QGroupBox:
         card = QGroupBox()
         h = QHBoxLayout(card)
         info = QVBoxLayout()
         name_lbl = QLabel(f"<b>{recipe['name']}</b>")
         em_list = [EndMember.from_dict(em) for em in recipe["end_members"]]
-        dop = Dopant.from_dict(recipe["dopant"])
-        comp = QLabel(prettify_formula(format_composition(em_list, dop)))
+        dops = self._dopants_from_recipe(recipe)
+        comp = QLabel(prettify_formula(format_composition(em_list, dops)))
         comp.setStyleSheet("font-family:monospace; color:#475569;")
         comp.setWordWrap(True)
         meta = QLabel(f"{recipe['batch_size']:.2f} g · {recipe['timestamp']}")
@@ -1167,7 +1308,7 @@ class MainWindow(QMainWindow):
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "batch_size": self.batch_spin.value(),
             "end_members": [c.to_endmember().to_dict() for c in self.end_member_cards],
-            "dopant": self._current_dopant().to_dict(),
+            "dopants": [d.to_dict() for d in self._current_dopants()],
             "reagent_choice": dict(self.reagent_choice),
             "excess_pct": dict(self.excess_pct),
             "apply_purity": self.purity_cb.isChecked(),
@@ -1190,16 +1331,8 @@ class MainWindow(QMainWindow):
         for i, em_dict in enumerate(recipe["end_members"]):
             self._add_end_member_card(EndMember.from_dict(em_dict), is_dominant=(i == 0))
 
-        dop = Dopant.from_dict(recipe["dopant"])
-        self.dopant_box.setChecked(dop.enabled)
-        if dop.site == "A":
-            self.dopant_site_a.setChecked(True)
-        else:
-            self.dopant_site_b.setChecked(True)
-        self.dopant_cation.blockSignals(True)
-        self.dopant_cation.setCurrentText(dop.cation)
-        self.dopant_cation.blockSignals(False)
-        self.dopant_level.setValue(dop.level)
+        self.dopants = self._dopants_from_recipe(recipe)
+        self._rebuild_dopant_rows()
 
         self.batch_spin.setValue(float(recipe["batch_size"]))
         self.purity_cb.setChecked(bool(recipe.get("apply_purity", True)))

@@ -11,6 +11,11 @@ from copy import deepcopy
 from data import ATOMIC_WEIGHTS
 
 
+# Dopant unit identifiers used in DopantEntry.unit
+UNIT_MOL_PCT = "mol_pct"
+UNIT_WT_PCT = "wt_pct"
+
+
 @dataclass
 class EndMember:
     """A single end-member in a (possibly composite) perovskite composition."""
@@ -30,21 +35,29 @@ class EndMember:
 
 
 @dataclass
-class Dopant:
-    enabled: bool = False
-    site: str = "A"       # "A" or "B"
-    cation: str = "Ca"
-    level: float = 0.015  # mol fraction (0..1)
+class DopantEntry:
+    """An additive dopant — weighed in on top of the base batch, not substituted.
+
+    `amount` is the user-supplied number; `unit` selects how to interpret it:
+      - "mol_pct": amount mol% of the base composition's formula-unit moles
+                   (so 1.0 means +0.01 × moles of dopant cation added).
+      - "wt_pct":  amount wt% of the base batch_size_g of dopant reagent
+                   (so 1.0 means dopant reagent mass = 0.01 × batch_size_g).
+    """
+    cation: str
+    amount: float = 1.0
+    unit: str = UNIT_MOL_PCT
 
     def to_dict(self) -> dict:
-        return {"enabled": self.enabled, "site": self.site, "cation": self.cation, "level": self.level}
+        return {"cation": self.cation, "amount": self.amount, "unit": self.unit}
 
     @staticmethod
-    def from_dict(d: dict) -> "Dopant":
-        return Dopant(enabled=bool(d.get("enabled", False)),
-                      site=d.get("site", "A"),
-                      cation=d.get("cation", "Ca"),
-                      level=float(d.get("level", 0.0)))
+    def from_dict(d: dict) -> "DopantEntry":
+        return DopantEntry(
+            cation=d["cation"],
+            amount=float(d.get("amount", 0.0)),
+            unit=d.get("unit", UNIT_MOL_PCT),
+        )
 
 
 @dataclass
@@ -82,6 +95,18 @@ class CalculationRow:
 
 
 @dataclass
+class DopantRow:
+    """Result row for a single additive dopant."""
+    cation: str
+    amount: float
+    unit: str
+    atomic_weight: float
+    reagent: Optional[Reagent]
+    mass: float            # reagent mass before purity correction
+    mass_to_weigh: float   # reagent mass after purity correction (if applied)
+
+
+@dataclass
 class CalculationResult:
     rows: List[CalculationRow]
     a_coeffs: Dict[str, float]
@@ -92,15 +117,19 @@ class CalculationResult:
     moles: float
     total_mass_with_excess: float
     total_mass_to_weigh: float
+    dopant_rows: List[DopantRow] = field(default_factory=list)
+    total_dopant_mass: float = 0.0          # sum of dopant masses before purity
+    total_dopant_to_weigh: float = 0.0      # sum of dopant masses with purity
+    grand_total_to_weigh: float = 0.0       # base + dopants, what the user actually puts on the scale
 
 
 def build_composition_coeffs(
     end_members: List[EndMember],
-    dopant: Optional[Dopant] = None,
 ) -> tuple[Dict[str, float], Dict[str, float]]:
-    """Combine end-members (weighted by mole fraction) and apply dopant substitution.
+    """Combine end-members (weighted by mole fraction) into A/B-site coefficients.
 
-    Returns (A_site_coeffs, B_site_coeffs) keyed by element symbol.
+    Dopants are additive (weighed in separately) and do NOT modify these
+    coefficients. Returns (A_site_coeffs, B_site_coeffs) keyed by element symbol.
     """
     A: Dict[str, float] = {}
     B: Dict[str, float] = {}
@@ -112,22 +141,13 @@ def build_composition_coeffs(
         for el, c in em.B.items():
             B[el] = B.get(el, 0.0) + f * c
 
-    if dopant is not None and dopant.enabled and dopant.cation and dopant.level > 0:
-        x = dopant.level
-        target = A if dopant.site == "A" else B
-        # Scale host cations down by (1 - x)
-        for el in list(target.keys()):
-            target[el] *= (1.0 - x)
-        # Add dopant
-        target[dopant.cation] = target.get(dopant.cation, 0.0) + x
-
     return A, B
 
 
 def calculate(
     batch_size_g: float,
     end_members: List[EndMember],
-    dopant: Optional[Dopant],
+    dopants: List[DopantEntry],
     reagents_by_element: Dict[str, Reagent],
     excess_percent: Dict[str, float],
     apply_purity: bool = True,
@@ -136,14 +156,17 @@ def calculate(
 
     Parameters
     ----------
-    batch_size_g : target mass of final ceramic product (after firing) in grams.
+    batch_size_g : target mass of the base ceramic product (after firing), in grams.
+                   Dopants are added ON TOP of this — they don't reduce the host
+                   reagent masses.
     end_members  : list of EndMember objects (their fractions should sum to 1).
-    dopant       : optional Dopant; if enabled, substitutes on its chosen site.
+    dopants      : list of DopantEntry; each contributes additional reagent mass.
     reagents_by_element : {element_symbol: Reagent} — which reagent supplies each element.
-    excess_percent : {element_symbol: percent} — extra moles of that element to compensate volatilization.
+    excess_percent : {element_symbol: percent} — extra moles of that element to
+                     compensate volatilization. Applies to base composition only.
     apply_purity : if True, divide reagent mass by (purity/100) to get the mass to weigh.
     """
-    a_coeffs, b_coeffs = build_composition_coeffs(end_members, dopant)
+    a_coeffs, b_coeffs = build_composition_coeffs(end_members)
 
     # Total moles of formula units = batch_size / total_MW
     # Oxygen coefficient: ABO3 perovskite → 3 per formula unit, scaled by sum of end-member fractions
@@ -198,6 +221,42 @@ def calculate(
     total_mass_with_excess = sum(r.mass_with_excess for r in rows)
     total_mass_to_weigh = sum(r.mass_to_weigh for r in rows)
 
+    # Dopants are added on top of the base batch — they do not modify rows above.
+    dopant_rows: List[DopantRow] = []
+    for dop in dopants or []:
+        if not dop.cation or dop.amount <= 0:
+            continue
+        reagent = reagents_by_element.get(dop.cation)
+        if dop.unit == UNIT_WT_PCT:
+            # amount wt% of the BASE batch mass, expressed as the dopant reagent.
+            mass = batch_size_g * (dop.amount / 100.0)
+        else:
+            # Default: mol% of base formula-unit moles.
+            extra_moles_of_cation = moles * (dop.amount / 100.0)
+            if reagent is not None and reagent.atoms > 0:
+                mass = extra_moles_of_cation * reagent.mw / reagent.atoms
+            else:
+                mass = 0.0
+
+        if apply_purity and reagent is not None and reagent.purity > 0:
+            mass_to_weigh = mass * (100.0 / reagent.purity)
+        else:
+            mass_to_weigh = mass
+
+        dopant_rows.append(DopantRow(
+            cation=dop.cation,
+            amount=dop.amount,
+            unit=dop.unit,
+            atomic_weight=ATOMIC_WEIGHTS.get(dop.cation, 0.0),
+            reagent=reagent,
+            mass=mass,
+            mass_to_weigh=mass_to_weigh,
+        ))
+
+    total_dopant_mass = sum(d.mass for d in dopant_rows)
+    total_dopant_to_weigh = sum(d.mass_to_weigh for d in dopant_rows)
+    grand_total_to_weigh = total_mass_to_weigh + total_dopant_to_weigh
+
     return CalculationResult(
         rows=rows,
         a_coeffs=a_coeffs,
@@ -208,6 +267,10 @@ def calculate(
         moles=moles,
         total_mass_with_excess=total_mass_with_excess,
         total_mass_to_weigh=total_mass_to_weigh,
+        dopant_rows=dopant_rows,
+        total_dopant_mass=total_dopant_mass,
+        total_dopant_to_weigh=total_dopant_to_weigh,
+        grand_total_to_weigh=grand_total_to_weigh,
     )
 
 
@@ -219,8 +282,16 @@ def normalize_dict(d: Dict[str, float]) -> Dict[str, float]:
     return {k: v / s for k, v in d.items()}
 
 
-def format_composition(end_members: List[EndMember], dopant: Optional[Dopant]) -> str:
-    """Human-readable composition string."""
+def _format_dopant(dop: DopantEntry) -> str:
+    unit = "wt%" if dop.unit == UNIT_WT_PCT else "mol%"
+    return f"{dop.amount:.4g} {unit} {dop.cation}"
+
+
+def format_composition(
+    end_members: List[EndMember],
+    dopants: Optional[List[DopantEntry]] = None,
+) -> str:
+    """Human-readable composition string. Dopants are listed as additive add-ons."""
     parts = []
     for em in end_members:
         if em.fraction <= 0:
@@ -230,6 +301,20 @@ def format_composition(end_members: List[EndMember], dopant: Optional[Dopant]) -
         prefix = "" if em.fraction == 1.0 else f"{em.fraction:.4g} "
         parts.append(f"{prefix}({a_str})({b_str})O3")
     s = " - ".join(parts)
-    if dopant and dopant.enabled and dopant.cation and dopant.level > 0:
-        s += f"  +{dopant.level:.4g} {dopant.cation} on {dopant.site}-site"
+    active = [d for d in (dopants or []) if d.cation and d.amount > 0]
+    if active:
+        s += "  + " + ", ".join(_format_dopant(d) for d in active)
     return s
+
+
+def dopant_entry_from_legacy_dict(d: dict) -> Optional[DopantEntry]:
+    """Convert the legacy {enabled, site, cation, level} dopant dict to a
+    single mol%-additive DopantEntry. Returns None for disabled / zero-level
+    entries. Used when loading recipes saved with the old substitutive model."""
+    if not d or not d.get("enabled"):
+        return None
+    level = float(d.get("level", 0.0) or 0.0)
+    cation = d.get("cation", "")
+    if level <= 0 or not cation:
+        return None
+    return DopantEntry(cation=cation, amount=level * 100.0, unit=UNIT_MOL_PCT)

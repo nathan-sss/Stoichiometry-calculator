@@ -19,8 +19,9 @@ from data import (
     PERIODIC_TABLE_LAYOUT, DEFAULT_REAGENTS, PRESETS, NON_CATION_ELEMENTS,
 )
 from calculator import (
-    EndMember, Dopant, Reagent, calculate, build_composition_coeffs,
-    format_composition, normalize_dict,
+    EndMember, DopantEntry, Reagent, calculate, build_composition_coeffs,
+    format_composition, normalize_dict, dopant_entry_from_legacy_dict,
+    UNIT_MOL_PCT, UNIT_WT_PCT,
 )
 
 
@@ -211,7 +212,7 @@ def init_state():
         "reagents": [Reagent.from_dict(r) for r in DEFAULT_REAGENTS],
         # Fresh start: one empty end-member. User loads a preset or builds custom.
         "end_members": [EndMember(name="EM1", fraction=1.0, A={}, B={})],
-        "dopant": Dopant(),
+        "dopants": [],          # List[DopantEntry]; each is additive on top of batch
         "batch_size": 50.0,
         "reagent_choice": {},   # element -> reagent name
         "excess_pct": {},       # element -> percent
@@ -221,7 +222,7 @@ def init_state():
         # Cation picker dialog state. target is one of:
         #   None                                  — dialog closed
         #   {"em_idx": int, "site": "A"/"B"}     — adding a cation to an EM site
-        #   "dopant"                              — picking the dopant cation
+        #   "add_dopant"                          — picking a new dopant cation
         "cation_picker_target": None,
     }
     for k, v in defaults.items():
@@ -366,17 +367,34 @@ def render_periodic_table(
 # by the nested end-member container. Triggered by setting
 # `st.session_state.cation_picker_target` and then re-running.
 
+def _base_cations_in_use() -> list[str]:
+    """All cations currently used in any end-member's A or B site."""
+    seen: set[str] = set()
+    for em in st.session_state.end_members:
+        seen.update(em.A.keys())
+        seen.update(em.B.keys())
+    return sorted(seen)
+
+
 @st.dialog("Pick cation", width="large")
 def cation_picker_dialog():
     target = st.session_state.get("cation_picker_target")
     if target is None:
         return
 
-    if target == "dopant":
-        site = st.session_state.dopant.site
-        selected = st.session_state.dopant.cation
-        excluded = None
-        st.markdown(f"Picking **dopant cation** for the **{site}-site**.")
+    if target == "add_dopant":
+        # Dopants must be elements NOT already in the base composition.
+        # Also exclude any cation already added as a dopant.
+        base = _base_cations_in_use()
+        already_doped = [d.cation for d in st.session_state.dopants]
+        excluded = base + already_doped
+        site = None
+        selected = None
+        st.markdown(
+            "Picking a **dopant cation**. The dopant is added on top of the "
+            "batch — it does not substitute into the host lattice. "
+            "Base-composition elements and existing dopants are disabled."
+        )
     else:
         em_idx = target["em_idx"]
         site = target["site"]
@@ -392,8 +410,10 @@ def cation_picker_dialog():
         key_prefix="dlg_pt",
     )
     if clicked:
-        if target == "dopant":
-            st.session_state.dopant.cation = clicked
+        if target == "add_dopant":
+            st.session_state.dopants.append(
+                DopantEntry(cation=clicked, amount=1.0, unit=UNIT_MOL_PCT)
+            )
         else:
             em_idx = target["em_idx"]
             site = target["site"]
@@ -442,7 +462,7 @@ if tab_choice == "Calculator":
                 if st.button(f"**{p['name']}**\n\n{prettify_formula(p['full'])}",
                              key=f"preset_{p['id']}", use_container_width=True):
                     st.session_state.end_members = [EndMember.from_dict(em) for em in p["end_members"]]
-                    st.session_state.dopant = Dopant()
+                    st.session_state.dopants = []
                     st.session_state.excess_pct = {}
                     st.session_state.reagent_choice = {}
                     # Wipe stale EM widget keys so newly-loaded fractions take effect.
@@ -456,7 +476,7 @@ if tab_choice == "Calculator":
         st.markdown("## Composition (ABO₃ perovskite)")
 
         em_sum = sum(em.fraction for em in st.session_state.end_members)
-        a_coeffs, b_coeffs = build_composition_coeffs(st.session_state.end_members, st.session_state.dopant)
+        a_coeffs, b_coeffs = build_composition_coeffs(st.session_state.end_members)
         a_sum = sum(a_coeffs.values())
         b_sum = sum(b_coeffs.values())
 
@@ -582,7 +602,7 @@ if tab_choice == "Calculator":
                 st.rerun()
 
         # Live composition preview (with empty-state friendly message)
-        _a, _b = build_composition_coeffs(st.session_state.end_members, st.session_state.dopant)
+        _a, _b = build_composition_coeffs(st.session_state.end_members)
         _all_elements = [e for e in set(list(_a.keys()) + list(_b.keys()))
                          if (_a.get(e, 0) + _b.get(e, 0)) > 1e-12]
         if not _all_elements:
@@ -593,58 +613,79 @@ if tab_choice == "Calculator":
             )
         else:
             comp_str = prettify_formula(
-                format_composition(st.session_state.end_members, st.session_state.dopant)
+                format_composition(st.session_state.end_members, st.session_state.dopants)
             )
             st.markdown(f"<div class='composition-preview'>{comp_str}</div>", unsafe_allow_html=True)
 
-    # ---- Dopant ----
-    with st.expander(f"⚛️ Dopant — {'enabled' if st.session_state.dopant.enabled else 'disabled'}",
-                     expanded=st.session_state.dopant.enabled):
-        new_enabled = st.checkbox("Enable dopant",
-                                  value=st.session_state.dopant.enabled,
-                                  key="dopant_enabled_cb")
-        if new_enabled != st.session_state.dopant.enabled:
-            st.session_state.dopant.enabled = new_enabled
+    # ---- Dopants (additive add-ons) ----
+    n_dop = len(st.session_state.dopants)
+    with st.expander(
+        f"⚛️ Dopants — {n_dop} added" if n_dop else "⚛️ Dopants — none",
+        expanded=n_dop > 0,
+    ):
+        st.caption(
+            "Dopants are weighed **in addition** to the batch — they do not "
+            "substitute into the host lattice or reduce the base reagent masses. "
+            "Pick any element not already in the base composition."
+        )
+
+        dop_to_remove: int | None = None
+        for i, dop in enumerate(st.session_state.dopants):
+            dc0, dc1, dc2, dc3 = st.columns([1.5, 1.5, 1.5, 0.6])
+            with dc0:
+                st.markdown(
+                    f"<div style='padding-top:8px;font-family:monospace;"
+                    f"font-weight:600;font-size:1.1em'>{dop.cation}</div>",
+                    unsafe_allow_html=True,
+                )
+            with dc1:
+                new_amount = st.number_input(
+                    f"Amount (dopant {i})",
+                    value=float(dop.amount),
+                    min_value=0.0, step=0.1, format="%.4f",
+                    key=f"dop_amount_{i}",
+                    label_visibility="collapsed",
+                )
+                if new_amount != dop.amount:
+                    st.session_state.dopants[i].amount = new_amount
+            with dc2:
+                unit_options = [UNIT_MOL_PCT, UNIT_WT_PCT]
+                unit_labels = {UNIT_MOL_PCT: "mol %", UNIT_WT_PCT: "wt %"}
+                idx = unit_options.index(dop.unit) if dop.unit in unit_options else 0
+                new_unit = st.selectbox(
+                    f"Unit (dopant {i})",
+                    unit_options,
+                    index=idx,
+                    format_func=lambda u: unit_labels[u],
+                    key=f"dop_unit_{i}",
+                    label_visibility="collapsed",
+                )
+                if new_unit != dop.unit:
+                    st.session_state.dopants[i].unit = new_unit
+            with dc3:
+                if st.button("✕", key=f"dop_del_{i}",
+                             use_container_width=True, help="Remove this dopant"):
+                    dop_to_remove = i
+
+        if dop_to_remove is not None:
+            st.session_state.dopants.pop(dop_to_remove)
+            # Clear stale widget keys so subsequent dopant rows re-sync from state.
+            for k in list(st.session_state.keys()):
+                if isinstance(k, str) and (k.startswith("dop_amount_") or k.startswith("dop_unit_")):
+                    del st.session_state[k]
             st.rerun()
 
-        if st.session_state.dopant.enabled:
-            dc1, dc2, dc3 = st.columns(3)
-            with dc1:
-                new_site = st.radio("Substitute on site", ["A", "B"],
-                                    index=0 if st.session_state.dopant.site == "A" else 1,
-                                    horizontal=True, key="dopant_site_radio")
-                if new_site != st.session_state.dopant.site:
-                    st.session_state.dopant.site = new_site
-                    # Reset cation to a sensible default for the new site
-                    if new_site == "A":
-                        st.session_state.dopant.cation = A_SITE_CATIONS[0]
-                    else:
-                        st.session_state.dopant.cation = B_SITE_CATIONS[0]
-                    st.rerun()
-            with dc2:
-                new_level = st.number_input("Doping level (mol fraction)",
-                                            value=float(st.session_state.dopant.level),
-                                            step=0.001, format="%.4f",
-                                            key="dopant_level_input")
-                if new_level != st.session_state.dopant.level:
-                    st.session_state.dopant.level = new_level
-                st.caption(f"= {st.session_state.dopant.level * 100:.3f} mol%")
-            with dc3:
-                st.markdown(f"**Current cation:** `{st.session_state.dopant.cation}`")
-                if st.session_state.dopant.site == "A" and st.session_state.dopant.cation not in A_SITE_CATIONS:
-                    st.warning(f"⚠ {st.session_state.dopant.cation} is unusual on A-site — check ionic radius.")
-                if st.session_state.dopant.site == "B" and st.session_state.dopant.cation not in B_SITE_CATIONS:
-                    st.warning(f"⚠ {st.session_state.dopant.cation} is unusual on B-site — check ionic radius.")
-
-            if st.button("🔬 Pick from periodic table…", key="dopant_pick_btn"):
-                st.session_state.cation_picker_target = "dopant"
-                st.rerun()
+        if st.button("➕ Add dopant", key="dopant_add_btn"):
+            st.session_state.cation_picker_target = "add_dopant"
+            st.rerun()
 
     # ---- Recompute coefficients for downstream sections ----
-    a_coeffs, b_coeffs = build_composition_coeffs(st.session_state.end_members, st.session_state.dopant)
+    a_coeffs, b_coeffs = build_composition_coeffs(st.session_state.end_members)
     elements = sorted(set(list(a_coeffs.keys()) + list(b_coeffs.keys())))
     elements = [el for el in elements if (a_coeffs.get(el, 0) + b_coeffs.get(el, 0)) > 1e-12]
-    auto_pick_reagents(elements)
+    # Dopant cations also need a reagent picked so we can compute their masses.
+    dopant_elements = sorted({d.cation for d in st.session_state.dopants if d.cation})
+    auto_pick_reagents(elements + dopant_elements)
 
     # ---- Batch & reagents & excess ----
     with st.container(border=True):
@@ -665,7 +706,7 @@ if tab_choice == "Calculator":
             )
 
         st.markdown("**Reagents & excess additions**")
-        st.caption("Excess = % of element moles to compensate volatilization (e.g. 3 for +3% Na)")
+        st.caption("Excess is given in **mol %** of the element's moles, used to compensate for volatilization (e.g. enter 3 for +3 mol% Na).")
 
         missing = []
         for el in elements:
@@ -704,7 +745,7 @@ if tab_choice == "Calculator":
             with rc3:
                 current_excess = st.session_state.excess_pct.get(el, 0.0)
                 new_excess = st.number_input(
-                    f"Excess % for {el}",
+                    f"Excess (mol %) for {el}",
                     value=float(current_excess),
                     step=0.5, format="%.4g",
                     key=f"excess_{el}",
@@ -716,7 +757,7 @@ if tab_choice == "Calculator":
     result = calculate(
         batch_size_g=st.session_state.batch_size,
         end_members=st.session_state.end_members,
-        dopant=st.session_state.dopant,
+        dopants=st.session_state.dopants,
         reagents_by_element=reagents_by_element_map(),
         excess_percent=st.session_state.excess_pct,
         apply_purity=st.session_state.apply_purity,
@@ -727,18 +768,25 @@ if tab_choice == "Calculator":
         st.markdown("### Mass calculation")
 
         mc1, mc2, mc3, mc4 = st.columns(4)
+        has_dopants = bool(result.dopant_rows)
         if not result.rows:
             mc1.metric("Total MW (g/mol)", "—")
             mc2.metric("Moles", "—")
-            mc3.metric("Total reagent (g)", "—")
-            label = "Total to weigh (g)" if not st.session_state.apply_purity else "Total w/ purity (g)"
-            mc4.metric(label, "—")
+            mc3.metric("Base reagent (g)", "—")
+            mc4.metric("Grand total (g)", "—")
         else:
             mc1.metric("Total MW (g/mol)", f"{result.total_mw:.4f}")
             mc2.metric("Moles", f"{result.moles:.4f}")
-            mc3.metric("Total reagent (g)", f"{result.total_mass_with_excess:.3f}")
-            label = "Total to weigh (g)" if not st.session_state.apply_purity else "Total w/ purity (g)"
-            mc4.metric(label, f"{result.total_mass_to_weigh:.3f}")
+            base_label = "Base w/ purity (g)" if st.session_state.apply_purity else "Base reagent (g)"
+            mc3.metric(base_label, f"{result.total_mass_to_weigh:.3f}")
+            if has_dopants:
+                mc4.metric(
+                    "Grand total (g)",
+                    f"{result.grand_total_to_weigh:.3f}",
+                    delta=f"+{result.total_dopant_to_weigh:.3f} dopant",
+                )
+            else:
+                mc4.metric("Grand total (g)", f"{result.total_mass_to_weigh:.3f}")
 
         # Build dataframe for display
         rows_data = []
@@ -749,7 +797,7 @@ if tab_choice == "Calculator":
                 "Site": site,
                 "At. wt": round(r.atomic_weight, 3),
                 "Coefficient": round(r.coeff, 4),
-                "Excess %": round(r.excess_pct, 4),
+                "Excess (mol %)": round(r.excess_pct, 4),
                 "Reagent": prettify_formula(r.reagent.name) if r.reagent else "—",
                 "Reagent MW": round(r.reagent.mw, 2) if r.reagent else None,
                 "Purity %": round(r.reagent.purity, 2) if r.reagent else None,
@@ -764,6 +812,24 @@ if tab_choice == "Calculator":
         # render_html_table() for the rationale.
         if rows_data:
             st.markdown(render_html_table(rows_data), unsafe_allow_html=True)
+
+        if result.dopant_rows:
+            st.markdown("**Add-on dopants** (weighed in addition to the base batch)")
+            dop_rows_data = []
+            mass_col = "w/ purity (g)" if st.session_state.apply_purity else "To weigh (g)"
+            for d in result.dopant_rows:
+                unit_label = "wt %" if d.unit == UNIT_WT_PCT else "mol %"
+                dop_rows_data.append({
+                    "Cation": d.cation,
+                    "Amount": f"{d.amount:.4g} {unit_label}",
+                    "At. wt": round(d.atomic_weight, 3),
+                    "Reagent": prettify_formula(d.reagent.name) if d.reagent else "—",
+                    "Reagent MW": round(d.reagent.mw, 2) if d.reagent else None,
+                    "Purity %": round(d.reagent.purity, 2) if d.reagent else None,
+                    "Mass (g)": round(d.mass, 4),
+                    mass_col: round(d.mass_to_weigh, 4),
+                })
+            st.markdown(render_html_table(dop_rows_data), unsafe_allow_html=True)
 
         st.caption(
             f"Oxygen contributes {result.oxygen_coeff:.3f} atoms × 15.999 = "
@@ -785,7 +851,7 @@ if tab_choice == "Calculator":
                     "timestamp": datetime.now().isoformat(),
                     "batch_size": st.session_state.batch_size,
                     "end_members": [em.to_dict() for em in st.session_state.end_members],
-                    "dopant": st.session_state.dopant.to_dict(),
+                    "dopants": [d.to_dict() for d in st.session_state.dopants],
                     "reagent_choice": dict(st.session_state.reagent_choice),
                     "excess_pct": dict(st.session_state.excess_pct),
                     "apply_purity": st.session_state.apply_purity,
@@ -798,13 +864,13 @@ if tab_choice == "Calculator":
             buf = StringIO()
             w = csv.writer(buf)
             w.writerow(["Recipe Export", datetime.now().isoformat()])
-            w.writerow(["Composition", format_composition(st.session_state.end_members, st.session_state.dopant)])
+            w.writerow(["Composition", format_composition(st.session_state.end_members, st.session_state.dopants)])
             w.writerow(["Batch size (g)", st.session_state.batch_size])
             w.writerow(["Purity correction", "applied" if st.session_state.apply_purity else "not applied"])
             w.writerow(["Total MW", f"{result.total_mw:.4f}"])
             w.writerow(["Moles", f"{result.moles:.6f}"])
             w.writerow([])
-            w.writerow(["Element", "Site", "At wt", "Coeff", "Excess %",
+            w.writerow(["Element", "Site", "At wt", "Coeff", "Excess (mol %)",
                         "Reagent", "Reagent MW", "Purity %",
                         "Mass target (g)", "Mass + excess (g)",
                         "Purity-corrected (g)" if st.session_state.apply_purity else "To weigh (g)"])
@@ -817,6 +883,25 @@ if tab_choice == "Calculator":
                             r.reagent.purity if r.reagent else "",
                             f"{r.mass_target:.4f}", f"{r.mass_with_excess:.4f}",
                             f"{r.mass_to_weigh:.4f}"])
+            if result.dopant_rows:
+                w.writerow([])
+                w.writerow(["Add-on dopants (in addition to the base batch)"])
+                mass_col = "Purity-corrected (g)" if st.session_state.apply_purity else "To weigh (g)"
+                w.writerow(["Cation", "Amount", "Unit", "At wt",
+                            "Reagent", "Reagent MW", "Purity %",
+                            "Mass (g)", mass_col])
+                for d in result.dopant_rows:
+                    unit_label = "wt %" if d.unit == UNIT_WT_PCT else "mol %"
+                    w.writerow([d.cation, f"{d.amount:.6f}", unit_label,
+                                d.atomic_weight,
+                                d.reagent.name if d.reagent else "",
+                                d.reagent.mw if d.reagent else "",
+                                d.reagent.purity if d.reagent else "",
+                                f"{d.mass:.4f}", f"{d.mass_to_weigh:.4f}"])
+                w.writerow([])
+                w.writerow(["Base total to weigh (g)", f"{result.total_mass_to_weigh:.4f}"])
+                w.writerow(["Dopant total to weigh (g)", f"{result.total_dopant_to_weigh:.4f}"])
+                w.writerow(["Grand total to weigh (g)", f"{result.grand_total_to_weigh:.4f}"])
             download_link(
                 "⬇️ Export CSV",
                 data=buf.getvalue(),
@@ -959,26 +1044,36 @@ elif tab_choice == "Saved Recipes":
     if not st.session_state.saved_recipes:
         st.info("No saved recipes yet. Save one from the Calculator tab.")
     else:
+        def _dopants_from_recipe(recipe: dict) -> list[DopantEntry]:
+            """Read dopants from either the new list format or the legacy single-dopant dict."""
+            if "dopants" in recipe and isinstance(recipe["dopants"], list):
+                return [DopantEntry.from_dict(d) for d in recipe["dopants"]]
+            legacy = dopant_entry_from_legacy_dict(recipe.get("dopant") or {})
+            return [legacy] if legacy is not None else []
+
         for recipe in st.session_state.saved_recipes:
             with st.container(border=True):
                 rc1, rc2, rc3 = st.columns([4, 1, 1])
                 with rc1:
                     st.markdown(f"**{recipe['name']}**")
                     em_list = [EndMember.from_dict(em) for em in recipe["end_members"]]
-                    dop = Dopant.from_dict(recipe["dopant"])
-                    st.code(prettify_formula(format_composition(em_list, dop)), language=None)
+                    dops = _dopants_from_recipe(recipe)
+                    st.code(prettify_formula(format_composition(em_list, dops)), language=None)
                     st.caption(f"{recipe['batch_size']:.2f} g · {recipe['timestamp']}")
                 with rc2:
                     if st.button("📥 Load", key=f"load_{recipe['id']}", use_container_width=True):
                         st.session_state.batch_size = recipe["batch_size"]
                         st.session_state.end_members = [EndMember.from_dict(em) for em in recipe["end_members"]]
-                        st.session_state.dopant = Dopant.from_dict(recipe["dopant"])
+                        st.session_state.dopants = _dopants_from_recipe(recipe)
                         st.session_state.reagent_choice = dict(recipe["reagent_choice"])
                         st.session_state.excess_pct = dict(recipe["excess_pct"])
                         st.session_state.apply_purity = recipe.get("apply_purity", True)
-                        # Clear stale EM widget keys so new fractions render correctly.
+                        # Clear stale EM / dopant widget keys so new values render correctly.
                         for k in list(st.session_state.keys()):
-                            if isinstance(k, str) and (k.startswith("em_frac_") or k.startswith("em_name_")):
+                            if isinstance(k, str) and (
+                                k.startswith("em_frac_") or k.startswith("em_name_")
+                                or k.startswith("dop_amount_") or k.startswith("dop_unit_")
+                            ):
                                 del st.session_state[k]
                         st.session_state.active_tab = "Calculator"
                         st.rerun()
