@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 from calculator import (
     DopantEntry, EndMember, Reagent, build_composition_coeffs, calculate,
     format_composition, dopant_entry_from_legacy_dict,
-    UNIT_MOL_PCT, UNIT_WT_PCT,
+    UNIT_MOL_PCT, UNIT_WT_PCT, MODE_SUBSTITUTIONAL, MODE_ADDITIVE,
 )
 from data import (
     A_SITE_CATIONS, ATOMIC_WEIGHTS, B_SITE_CATIONS, DEFAULT_REAGENTS,
@@ -510,13 +510,16 @@ class MainWindow(QMainWindow):
         self.body_layout.addWidget(box)
 
     def _build_dopant(self):
-        box = QGroupBox("Dopants (added on top of the batch — not substituted)")
+        box = QGroupBox("Dopants")
         v = QVBoxLayout(box)
 
         caption = QLabel(
-            "Each dopant is weighed in addition to the base batch. Use "
-            "<b>mol %</b> for excess of the cation relative to the formula-unit moles, "
-            "or <b>wt %</b> for percent of the base batch mass."
+            "<b>Substitute (lattice):</b> the cation replaces host ions on a site "
+            "→ (host)₁₋ₓ(dopant)ₓ; reduces host reagent masses and changes the MW. "
+            "<b>Add on top:</b> weighed in as an extra (sintering aid, second phase), "
+            "leaving the host stoichiometry untouched. "
+            "(For excess of an element already in the base — e.g. excess Bi₂O₃ — "
+            "use the Excess column instead.)"
         )
         caption.setWordWrap(True)
         caption.setStyleSheet("color: #64748b; font-size: 12px;")
@@ -524,7 +527,8 @@ class MainWindow(QMainWindow):
 
         # Header row
         head = QHBoxLayout()
-        for label, w in [("Cation", 70), ("Amount", 110), ("Unit", 110), ("", 32)]:
+        for label, w in [("Cation", 50), ("Mode", 170), ("Site / unit", 110),
+                         ("Amount", 100), ("", 32)]:
             lbl = QLabel(f"<b>{label}</b>" if label else "")
             lbl.setMinimumWidth(w)
             head.addWidget(lbl)
@@ -713,12 +717,17 @@ class MainWindow(QMainWindow):
         excluded = self._base_cations_in_use() + [d.cation for d in self.dopants]
         picked = PeriodicTablePicker.pick(self, site=None, excluded=excluded)
         if picked:
-            self.dopants.append(DopantEntry(cation=picked, amount=1.0, unit=UNIT_MOL_PCT))
+            self.dopants.append(DopantEntry(cation=picked, amount=1.0,
+                                            mode=MODE_SUBSTITUTIONAL, site="B"))
             self._rebuild_dopant_rows()
             self._recalculate()
 
     def _rebuild_dopant_rows(self):
-        """Clear and re-render the dopant rows from self.dopants."""
+        """Clear and re-render the dopant rows from self.dopants.
+
+        Each row: cation · mode (substitute/add-on) · site-or-unit · amount · ✕.
+        The third widget swaps between an A/B site picker (substitutional) and a
+        mol%/wt% unit picker (additive) depending on the row's mode."""
         # Tear down previous widgets
         while self.dopant_rows_layout.count():
             item = self.dopant_rows_layout.takeAt(0)
@@ -734,36 +743,72 @@ class MainWindow(QMainWindow):
             h.setContentsMargins(0, 0, 0, 0)
 
             cation_lbl = QLabel(f"<b>{dop.cation}</b>")
-            cation_lbl.setMinimumWidth(70)
+            cation_lbl.setMinimumWidth(50)
             h.addWidget(cation_lbl)
+
+            mode_combo = NoWheelComboBox()
+            mode_combo.addItem("Substitute (lattice)", userData=MODE_SUBSTITUTIONAL)
+            mode_combo.addItem("Add on top", userData=MODE_ADDITIVE)
+            mode_combo.setCurrentIndex(0 if dop.mode == MODE_SUBSTITUTIONAL else 1)
+            mode_combo.setMinimumWidth(170)
+            h.addWidget(mode_combo)
+
+            if dop.mode == MODE_SUBSTITUTIONAL:
+                site_combo = NoWheelComboBox()
+                site_combo.addItem("A-site", userData="A")
+                site_combo.addItem("B-site", userData="B")
+                site_combo.setCurrentIndex(0 if dop.site == "A" else 1)
+                site_combo.setMinimumWidth(110)
+                site_combo.setMaximumWidth(110)
+                h.addWidget(site_combo)
+                site_combo.currentIndexChanged.connect(
+                    lambda _i, idx=i, c=site_combo: self._on_dopant_site_changed(idx, c))
+            else:
+                unit_combo = NoWheelComboBox()
+                unit_combo.addItem("mol %", userData=UNIT_MOL_PCT)
+                unit_combo.addItem("wt %", userData=UNIT_WT_PCT)
+                unit_combo.setCurrentIndex(0 if dop.unit == UNIT_MOL_PCT else 1)
+                unit_combo.setMinimumWidth(110)
+                unit_combo.setMaximumWidth(110)
+                h.addWidget(unit_combo)
+                unit_combo.currentIndexChanged.connect(
+                    lambda _i, idx=i, c=unit_combo: self._on_dopant_unit_changed(idx, c))
 
             amount_spin = make_spin(dop.amount, step=0.1, decimals=4,
                                     minimum=0.0, maximum=100.0)
-            amount_spin.setMinimumWidth(110)
-            amount_spin.setMaximumWidth(110)
+            amount_spin.setMinimumWidth(100)
+            amount_spin.setMaximumWidth(100)
             h.addWidget(amount_spin)
-
-            unit_combo = NoWheelComboBox()
-            unit_combo.addItem("mol %", userData=UNIT_MOL_PCT)
-            unit_combo.addItem("wt %", userData=UNIT_WT_PCT)
-            unit_combo.setCurrentIndex(0 if dop.unit == UNIT_MOL_PCT else 1)
-            unit_combo.setMinimumWidth(110)
-            unit_combo.setMaximumWidth(110)
-            h.addWidget(unit_combo)
+            # Substitutional amount is always mol%; additive uses the unit combo.
+            amount_unit_lbl = QLabel("mol %" if dop.mode == MODE_SUBSTITUTIONAL else "")
+            amount_unit_lbl.setStyleSheet("color:#64748b;")
+            h.addWidget(amount_unit_lbl)
 
             remove_btn = QPushButton("✕")
             remove_btn.setFixedWidth(32)
             h.addWidget(remove_btn)
             h.addStretch(1)
 
+            mode_combo.currentIndexChanged.connect(
+                lambda _i, idx=i, c=mode_combo: self._on_dopant_mode_changed(idx, c))
             amount_spin.valueChanged.connect(
                 lambda v, idx=i: self._on_dopant_amount_changed(idx, v))
-            unit_combo.currentIndexChanged.connect(
-                lambda _i, idx=i, c=unit_combo: self._on_dopant_unit_changed(idx, c))
             remove_btn.clicked.connect(lambda _c=False, idx=i: self._remove_dopant(idx))
 
             self.dopant_rows_layout.addWidget(row)
             self._dopant_row_widgets.append(row)
+
+    def _on_dopant_mode_changed(self, idx: int, combo: QComboBox):
+        if 0 <= idx < len(self.dopants):
+            self.dopants[idx].mode = combo.currentData() or MODE_ADDITIVE
+            # Rebuild so the site/unit widget swaps to match the new mode.
+            self._rebuild_dopant_rows()
+            self._recalculate()
+
+    def _on_dopant_site_changed(self, idx: int, combo: QComboBox):
+        if 0 <= idx < len(self.dopants):
+            self.dopants[idx].site = combo.currentData() or "B"
+            self._recalculate()
 
     def _on_dopant_amount_changed(self, idx: int, value: float):
         if 0 <= idx < len(self.dopants):
@@ -788,7 +833,8 @@ class MainWindow(QMainWindow):
         return [c.to_endmember() for c in self.end_member_cards]
 
     def _current_dopants(self) -> list[DopantEntry]:
-        return [DopantEntry(cation=d.cation, amount=d.amount, unit=d.unit)
+        return [DopantEntry(cation=d.cation, amount=d.amount,
+                            mode=d.mode, unit=d.unit, site=d.site)
                 for d in self.dopants]
 
     def _reagents_by_element(self) -> dict[str, Reagent]:
@@ -808,7 +854,7 @@ class MainWindow(QMainWindow):
         dopants = self._current_dopants()
 
         em_sum = sum(em.fraction for em in end_members)
-        a_coeffs, b_coeffs = build_composition_coeffs(end_members)
+        a_coeffs, b_coeffs = build_composition_coeffs(end_members, dopants)
         a_sum = sum(a_coeffs.values())
         b_sum = sum(b_coeffs.values())
 

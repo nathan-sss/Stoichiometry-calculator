@@ -11,9 +11,13 @@ from copy import deepcopy
 from data import ATOMIC_WEIGHTS
 
 
-# Dopant unit identifiers used in DopantEntry.unit
+# Dopant unit identifiers used in DopantEntry.unit (additive mode only)
 UNIT_MOL_PCT = "mol_pct"
 UNIT_WT_PCT = "wt_pct"
+
+# Dopant incorporation modes used in DopantEntry.mode
+MODE_SUBSTITUTIONAL = "substitutional"   # replaces host ions on a site
+MODE_ADDITIVE = "additive"               # weighed in on top of the batch
 
 
 @dataclass
@@ -36,27 +40,41 @@ class EndMember:
 
 @dataclass
 class DopantEntry:
-    """An additive dopant — weighed in on top of the base batch, not substituted.
+    """A dopant with one of two physically distinct incorporation modes.
 
-    `amount` is the user-supplied number; `unit` selects how to interpret it:
-      - "mol_pct": amount mol% of the base composition's formula-unit moles
-                   (so 1.0 means +0.01 × moles of dopant cation added).
-      - "wt_pct":  amount wt% of the base batch_size_g of dopant reagent
-                   (so 1.0 means dopant reagent mass = 0.01 × batch_size_g).
+    mode == "substitutional":
+        The cation replaces host ions on `site` (A or B), written into the
+        formula as (host)_{1-x}(dopant)_x. This reduces the host reagent masses
+        and changes the formula MW. `amount` is the substitution level in mol%
+        (x = amount/100). `unit` is ignored.
+
+    mode == "additive":
+        The cation is weighed in ON TOP of a fixed base batch and does not enter
+        the host stoichiometry. `amount` + `unit` set how much:
+          - "mol_pct": amount mol% of the base formula-unit moles
+                       (1.0 → +0.01 × moles of cation).
+          - "wt_pct":  amount wt% of the batch mass, as the dopant reagent
+                       (1.0 → reagent mass = 0.01 × batch_size_g).
+        `site` is ignored.
     """
     cation: str
     amount: float = 1.0
-    unit: str = UNIT_MOL_PCT
+    mode: str = MODE_ADDITIVE
+    unit: str = UNIT_MOL_PCT   # additive only
+    site: str = "B"            # substitutional only
 
     def to_dict(self) -> dict:
-        return {"cation": self.cation, "amount": self.amount, "unit": self.unit}
+        return {"cation": self.cation, "amount": self.amount,
+                "mode": self.mode, "unit": self.unit, "site": self.site}
 
     @staticmethod
     def from_dict(d: dict) -> "DopantEntry":
         return DopantEntry(
             cation=d["cation"],
             amount=float(d.get("amount", 0.0)),
+            mode=d.get("mode", MODE_ADDITIVE),
             unit=d.get("unit", UNIT_MOL_PCT),
+            site=d.get("site", "B"),
         )
 
 
@@ -125,11 +143,17 @@ class CalculationResult:
 
 def build_composition_coeffs(
     end_members: List[EndMember],
+    dopants: Optional[List["DopantEntry"]] = None,
 ) -> tuple[Dict[str, float], Dict[str, float]]:
-    """Combine end-members (weighted by mole fraction) into A/B-site coefficients.
+    """Combine end-members (weighted by mole fraction) into A/B-site coefficients,
+    then fold in any SUBSTITUTIONAL dopants.
 
-    Dopants are additive (weighed in separately) and do NOT modify these
-    coefficients. Returns (A_site_coeffs, B_site_coeffs) keyed by element symbol.
+    Substitutional dopants replace host ions on their site: each host coefficient
+    is scaled by (1 − Σx) and each dopant added at its x, so the site sum is
+    preserved and the formula MW reflects the substitution. Additive dopants are
+    weighed separately (handled in calculate) and do NOT modify these coefficients.
+
+    Returns (A_site_coeffs, B_site_coeffs) keyed by element symbol.
     """
     A: Dict[str, float] = {}
     B: Dict[str, float] = {}
@@ -140,6 +164,22 @@ def build_composition_coeffs(
             A[el] = A.get(el, 0.0) + f * c
         for el, c in em.B.items():
             B[el] = B.get(el, 0.0) + f * c
+
+    # Fold substitutional dopants into each site (co-doping aware: hosts on a
+    # site share the remaining 1 − Σx among the dopants substituting there).
+    for site_key, target in (("A", A), ("B", B)):
+        subs = [
+            d for d in (dopants or [])
+            if d.mode == MODE_SUBSTITUTIONAL and d.site == site_key
+            and d.cation and d.amount > 0
+        ]
+        if not subs:
+            continue
+        total_x = sum(d.amount / 100.0 for d in subs)
+        for el in list(target.keys()):
+            target[el] *= (1.0 - total_x)
+        for d in subs:
+            target[d.cation] = target.get(d.cation, 0.0) + d.amount / 100.0
 
     return A, B
 
@@ -166,7 +206,9 @@ def calculate(
                      compensate volatilization. Applies to base composition only.
     apply_purity : if True, divide reagent mass by (purity/100) to get the mass to weigh.
     """
-    a_coeffs, b_coeffs = build_composition_coeffs(end_members)
+    # Substitutional dopants are folded into the composition here; additive ones
+    # are weighed on top further down.
+    a_coeffs, b_coeffs = build_composition_coeffs(end_members, dopants)
 
     # Total moles of formula units = batch_size / total_MW
     # Oxygen coefficient: ABO3 perovskite → 3 per formula unit, scaled by sum of end-member fractions
@@ -221,9 +263,13 @@ def calculate(
     total_mass_with_excess = sum(r.mass_with_excess for r in rows)
     total_mass_to_weigh = sum(r.mass_to_weigh for r in rows)
 
-    # Dopants are added on top of the base batch — they do not modify rows above.
+    # Additive dopants are weighed on top of the base batch — they do not modify
+    # the rows above. (Substitutional dopants were already folded into the
+    # composition and appear as ordinary element rows.)
     dopant_rows: List[DopantRow] = []
     for dop in dopants or []:
+        if dop.mode != MODE_ADDITIVE:
+            continue
         if not dop.cation or dop.amount <= 0:
             continue
         reagent = reagents_by_element.get(dop.cation)
@@ -282,16 +328,15 @@ def normalize_dict(d: Dict[str, float]) -> Dict[str, float]:
     return {k: v / s for k, v in d.items()}
 
 
-def _format_dopant(dop: DopantEntry) -> str:
-    unit = "wt%" if dop.unit == UNIT_WT_PCT else "mol%"
-    return f"{dop.amount:.4g} {unit} {dop.cation}"
-
-
 def format_composition(
     end_members: List[EndMember],
     dopants: Optional[List[DopantEntry]] = None,
 ) -> str:
-    """Human-readable composition string. Dopants are listed as additive add-ons."""
+    """Human-readable composition string.
+
+    Substitutional dopants are listed as `x mol% Cation→site`, additive ones as
+    `x unit Cation (add)`.
+    """
     parts = []
     for em in end_members:
         if em.fraction <= 0:
@@ -301,20 +346,30 @@ def format_composition(
         prefix = "" if em.fraction == 1.0 else f"{em.fraction:.4g} "
         parts.append(f"{prefix}({a_str})({b_str})O3")
     s = " - ".join(parts)
+
     active = [d for d in (dopants or []) if d.cation and d.amount > 0]
-    if active:
-        s += "  + " + ", ".join(_format_dopant(d) for d in active)
+    extra: List[str] = []
+    for d in active:
+        if d.mode == MODE_SUBSTITUTIONAL:
+            extra.append(f"{d.amount:.4g} mol% {d.cation}→{d.site}")
+        else:
+            unit = "wt%" if d.unit == UNIT_WT_PCT else "mol%"
+            extra.append(f"{d.amount:.4g} {unit} {d.cation} (add)")
+    if extra:
+        s += "  + " + ", ".join(extra)
     return s
 
 
 def dopant_entry_from_legacy_dict(d: dict) -> Optional[DopantEntry]:
     """Convert the legacy {enabled, site, cation, level} dopant dict to a
-    single mol%-additive DopantEntry. Returns None for disabled / zero-level
-    entries. Used when loading recipes saved with the old substitutive model."""
+    SUBSTITUTIONAL DopantEntry (the legacy model scaled host cations on a site,
+    i.e. it was substitutional). Returns None for disabled / zero-level entries.
+    Used when loading recipes saved with the old single-dopant model."""
     if not d or not d.get("enabled"):
         return None
     level = float(d.get("level", 0.0) or 0.0)
     cation = d.get("cation", "")
     if level <= 0 or not cation:
         return None
-    return DopantEntry(cation=cation, amount=level * 100.0, unit=UNIT_MOL_PCT)
+    return DopantEntry(cation=cation, amount=level * 100.0,
+                       mode=MODE_SUBSTITUTIONAL, site=d.get("site", "A"))

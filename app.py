@@ -21,7 +21,7 @@ from data import (
 from calculator import (
     EndMember, DopantEntry, Reagent, calculate, build_composition_coeffs,
     format_composition, normalize_dict, dopant_entry_from_legacy_dict,
-    UNIT_MOL_PCT, UNIT_WT_PCT,
+    UNIT_MOL_PCT, UNIT_WT_PCT, MODE_SUBSTITUTIONAL, MODE_ADDITIVE,
 )
 
 
@@ -493,7 +493,8 @@ def cation_picker_dialog():
     if clicked:
         if target == "add_dopant":
             st.session_state.dopants.append(
-                DopantEntry(cation=clicked, amount=1.0, unit=UNIT_MOL_PCT)
+                DopantEntry(cation=clicked, amount=1.0,
+                            mode=MODE_SUBSTITUTIONAL, site="B")
             )
         else:
             em_idx = target["em_idx"]
@@ -557,7 +558,7 @@ if tab_choice == "Calculator":
         st.markdown("## Composition (ABO₃ perovskite)")
 
         em_sum = sum(em.fraction for em in st.session_state.end_members)
-        a_coeffs, b_coeffs = build_composition_coeffs(st.session_state.end_members)
+        a_coeffs, b_coeffs = build_composition_coeffs(st.session_state.end_members, st.session_state.dopants)
         a_sum = sum(a_coeffs.values())
         b_sum = sum(b_coeffs.values())
 
@@ -683,7 +684,7 @@ if tab_choice == "Calculator":
                 st.rerun()
 
         # Live composition preview (with empty-state friendly message)
-        _a, _b = build_composition_coeffs(st.session_state.end_members)
+        _a, _b = build_composition_coeffs(st.session_state.end_members, st.session_state.dopants)
         _all_elements = [e for e in set(list(_a.keys()) + list(_b.keys()))
                          if (_a.get(e, 0) + _b.get(e, 0)) > 1e-12]
         if not _all_elements:
@@ -698,28 +699,73 @@ if tab_choice == "Calculator":
             )
             st.markdown(f"<div class='composition-preview'>{comp_str}</div>", unsafe_allow_html=True)
 
-    # ---- Dopants (additive add-ons) ----
+    # ---- Dopants ----
     n_dop = len(st.session_state.dopants)
     with st.expander(
         f"⚛️ Dopants — {n_dop} added" if n_dop else "⚛️ Dopants — none",
         expanded=n_dop > 0,
     ):
         st.caption(
-            "Dopants are weighed **in addition** to the batch — they do not "
-            "substitute into the host lattice or reduce the base reagent masses. "
-            "Pick any element not already in the base composition."
+            "**Substitute (lattice):** the cation replaces host ions on a site "
+            "→ (host)₁₋ₓ(dopant)ₓ; reduces the host reagent masses and changes the "
+            "MW. **Add on top:** weighed in as an extra (sintering aid, second "
+            "phase), leaving the host stoichiometry untouched. "
+            "*(For excess of an element already in the base — e.g. excess Bi₂O₃ — "
+            "use the Excess column below instead.)*"
         )
+
+        if st.session_state.dopants:
+            hdr = st.columns([1.0, 1.9, 1.7, 1.3, 0.5])
+            for c, label in zip(hdr, ["Cation", "Mode", "Site / unit", "Amount", ""]):
+                c.markdown(f"<span style='font-size:11px;color:#64748b'>{label}</span>",
+                           unsafe_allow_html=True)
 
         dop_to_remove: int | None = None
         for i, dop in enumerate(st.session_state.dopants):
-            dc0, dc1, dc2, dc3 = st.columns([1.5, 1.5, 1.5, 0.6])
-            with dc0:
+            dc = st.columns([1.0, 1.9, 1.7, 1.3, 0.5])
+            with dc[0]:
                 st.markdown(
-                    f"<div style='padding-top:8px;font-family:monospace;"
+                    f"<div style='padding-top:6px;font-family:monospace;"
                     f"font-weight:600;font-size:1.1em'>{dop.cation}</div>",
                     unsafe_allow_html=True,
                 )
-            with dc1:
+            with dc[1]:
+                mode_opts = [MODE_SUBSTITUTIONAL, MODE_ADDITIVE]
+                mode_labels = {MODE_SUBSTITUTIONAL: "Substitute (lattice)",
+                               MODE_ADDITIVE: "Add on top"}
+                new_mode = st.selectbox(
+                    f"Mode (dopant {i})", mode_opts,
+                    index=mode_opts.index(dop.mode) if dop.mode in mode_opts else 0,
+                    format_func=lambda m: mode_labels[m],
+                    key=f"dop_mode_{i}", label_visibility="collapsed",
+                )
+                if new_mode != dop.mode:
+                    st.session_state.dopants[i].mode = new_mode
+                    st.rerun()  # swap the site/unit widget in the next column
+            with dc[2]:
+                if dop.mode == MODE_SUBSTITUTIONAL:
+                    new_site = st.selectbox(
+                        f"Site (dopant {i})", ["A", "B"],
+                        index=0 if dop.site == "A" else 1,
+                        format_func=lambda s: f"{s}-site",
+                        key=f"dop_site_{i}", label_visibility="collapsed",
+                    )
+                    if new_site != dop.site:
+                        st.session_state.dopants[i].site = new_site
+                        st.rerun()
+                else:
+                    unit_opts = [UNIT_MOL_PCT, UNIT_WT_PCT]
+                    unit_labels = {UNIT_MOL_PCT: "mol %", UNIT_WT_PCT: "wt %"}
+                    new_unit = st.selectbox(
+                        f"Unit (dopant {i})", unit_opts,
+                        index=unit_opts.index(dop.unit) if dop.unit in unit_opts else 0,
+                        format_func=lambda u: unit_labels[u],
+                        key=f"dop_unit_{i}", label_visibility="collapsed",
+                    )
+                    if new_unit != dop.unit:
+                        st.session_state.dopants[i].unit = new_unit
+            with dc[3]:
+                # Substitutional amount is always mol% (substitution level x).
                 new_amount = st.number_input(
                     f"Amount (dopant {i})",
                     value=float(dop.amount),
@@ -729,21 +775,7 @@ if tab_choice == "Calculator":
                 )
                 if new_amount != dop.amount:
                     st.session_state.dopants[i].amount = new_amount
-            with dc2:
-                unit_options = [UNIT_MOL_PCT, UNIT_WT_PCT]
-                unit_labels = {UNIT_MOL_PCT: "mol %", UNIT_WT_PCT: "wt %"}
-                idx = unit_options.index(dop.unit) if dop.unit in unit_options else 0
-                new_unit = st.selectbox(
-                    f"Unit (dopant {i})",
-                    unit_options,
-                    index=idx,
-                    format_func=lambda u: unit_labels[u],
-                    key=f"dop_unit_{i}",
-                    label_visibility="collapsed",
-                )
-                if new_unit != dop.unit:
-                    st.session_state.dopants[i].unit = new_unit
-            with dc3:
+            with dc[4]:
                 if st.button("✕", key=f"dop_del_{i}",
                              use_container_width=True, help="Remove this dopant"):
                     dop_to_remove = i
@@ -752,7 +784,10 @@ if tab_choice == "Calculator":
             st.session_state.dopants.pop(dop_to_remove)
             # Clear stale widget keys so subsequent dopant rows re-sync from state.
             for k in list(st.session_state.keys()):
-                if isinstance(k, str) and (k.startswith("dop_amount_") or k.startswith("dop_unit_")):
+                if isinstance(k, str) and (
+                    k.startswith("dop_amount_") or k.startswith("dop_unit_")
+                    or k.startswith("dop_mode_") or k.startswith("dop_site_")
+                ):
                     del st.session_state[k]
             st.rerun()
 
@@ -761,7 +796,7 @@ if tab_choice == "Calculator":
             st.rerun()
 
     # ---- Recompute coefficients for downstream sections ----
-    a_coeffs, b_coeffs = build_composition_coeffs(st.session_state.end_members)
+    a_coeffs, b_coeffs = build_composition_coeffs(st.session_state.end_members, st.session_state.dopants)
     elements = sorted(set(list(a_coeffs.keys()) + list(b_coeffs.keys())))
     elements = [el for el in elements if (a_coeffs.get(el, 0) + b_coeffs.get(el, 0)) > 1e-12]
     # Dopant cations also need a reagent picked so we can compute their masses.
