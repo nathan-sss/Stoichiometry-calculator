@@ -584,10 +584,10 @@ class MainWindow(QMainWindow):
         metrics.addStretch(1)
         v.addLayout(metrics)
 
-        self.results_table = QTableWidget(0, 10)
+        self.results_table = QTableWidget(0, 9)
         self.results_table.setHorizontalHeaderLabels([
             "Element", "Site", "At. wt", "Coeff", "Excess (mol %)",
-            "Reagent", "Reagent MW", "Purity %", "Target (g)", "To weigh (g)"
+            "Reagent", "Reagent MW", "Purity %", "To weigh (g)"
         ])
         self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.results_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -602,11 +602,11 @@ class MainWindow(QMainWindow):
         self.dopants_section_label.setVisible(False)
         v.addWidget(self.dopants_section_label)
 
-        self.dopants_table = QTableWidget(0, 8)
+        self.dopants_table = QTableWidget(0, 7)
         self.dopants_table.setHorizontalHeaderLabels([
             "Cation", "Amount", "At. wt",
             "Reagent", "Reagent MW", "Purity %",
-            "Mass (g)", "To weigh (g)",
+            "To weigh (g)",
         ])
         self.dopants_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.dopants_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -886,7 +886,6 @@ class MainWindow(QMainWindow):
                     prettify_formula(r.reagent.name) if r.reagent else "—",
                     f"{r.reagent.mw:.2f}" if r.reagent else "",
                     f"{r.reagent.purity:.2f}" if r.reagent else "",
-                    f"{r.mass_target:.4f}",
                     f"{r.mass_to_weigh:.4f}",
                 ]
                 for j, v in enumerate(vals):
@@ -906,7 +905,6 @@ class MainWindow(QMainWindow):
                         prettify_formula(d.reagent.name) if d.reagent else "—",
                         f"{d.reagent.mw:.2f}" if d.reagent else "",
                         f"{d.reagent.purity:.2f}" if d.reagent else "",
-                        f"{d.mass:.4f}",
                         f"{d.mass_to_weigh:.4f}",
                     ]
                     for j, v in enumerate(vals):

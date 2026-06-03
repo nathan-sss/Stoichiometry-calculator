@@ -107,8 +107,10 @@
           // serialize via Apache Arrow IPC, and the conversion fails on plain
           // list-of-dicts inputs with "Parquet error: Repetition level must
           // be defined for a primitive type" without pandas.
+          // matplotlib powers the "Make recipe image" PNG export. Both are
+          // pre-built for Pyodide, so they install from the CDN at first load.
           const reqs = document.createElement("app-requirements");
-          reqs.textContent = "pandas";
+          reqs.textContent = "pandas\nmatplotlib";
           streamlitApp.appendChild(reqs);
 
           for (const [name, content, isEntry] of [

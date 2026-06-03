@@ -10,7 +10,7 @@ import json
 import re
 from copy import deepcopy
 from datetime import datetime
-from io import StringIO
+from io import BytesIO, StringIO
 
 import streamlit as st
 
@@ -92,6 +92,17 @@ def download_link(label: str, data: str, filename: str, mime: str) -> None:
     deployed on GitHub Pages (service-worker scope can't cover a subpath
     deployment). A data: URL is fully browser-handled and works everywhere."""
     b64 = base64.b64encode(data.encode("utf-8")).decode("ascii")
+    _render_download_anchor(label, b64, filename, mime)
+
+
+def download_bytes_link(label: str, data: bytes, filename: str, mime: str) -> None:
+    """Same data-URL download trick as download_link, but for binary payloads
+    (e.g. a PNG image) so they survive the stlite/GitHub Pages deployment."""
+    b64 = base64.b64encode(data).decode("ascii")
+    _render_download_anchor(label, b64, filename, mime)
+
+
+def _render_download_anchor(label: str, b64: str, filename: str, mime: str) -> None:
     href = f"data:{mime};base64,{b64}"
     st.markdown(
         f'<a href="{href}" download="{filename}" '
@@ -101,6 +112,76 @@ def download_link(label: str, data: str, filename: str, mime: str) -> None:
         f'{label}</a>',
         unsafe_allow_html=True,
     )
+
+
+def build_recipe_image(result, composition_str: str, batch_size: float,
+                       apply_purity: bool) -> bytes:
+    """Render a printable 'weigh sheet' PNG with the composition as the title.
+
+    matplotlib is used because it renders identically on the stlite/Pyodide web
+    build and produces a clean, lab-notebook-ready card. Imported lazily so the
+    rest of the app still loads if matplotlib is unavailable."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    # Purity state is shown in the subtitle, so the column header stays short
+    # (a long header gets clipped at the tight bbox edge).
+    weigh_label = "Weigh (g)"
+
+    table_rows: list[list[str]] = []
+    for r in result.rows:
+        if r.reagent is None:
+            continue
+        table_rows.append([
+            prettify_formula(r.reagent.name), r.element, f"{r.mass_to_weigh:.4f}",
+        ])
+    for d in result.dopant_rows:
+        unit_label = "wt %" if d.unit == UNIT_WT_PCT else "mol %"
+        name = prettify_formula(d.reagent.name) if d.reagent else "—"
+        table_rows.append([
+            name, f"{d.cation} · dopant {d.amount:.4g} {unit_label}",
+            f"{d.mass_to_weigh:.4f}",
+        ])
+    table_rows.append(["TOTAL", "", f"{result.grand_total_to_weigh:.4f}"])
+
+    n_rows = len(table_rows)
+    fig_h = 1.7 + 0.4 * n_rows
+    fig, ax = plt.subplots(figsize=(8.0, fig_h))
+    ax.axis("off")
+
+    fig.suptitle(prettify_formula(composition_str), fontsize=15,
+                 fontweight="bold", y=0.99)
+    purity_note = "purity-corrected" if apply_purity else "no purity correction"
+    ax.set_title(
+        f"Batch {batch_size:g} g  ·  {purity_note}  ·  {datetime.now():%Y-%m-%d}",
+        fontsize=9, color="#555555", pad=14,
+    )
+
+    table = ax.table(
+        cellText=table_rows,
+        colLabels=["Reagent", "Supplies", weigh_label],
+        cellLoc="left", loc="center",
+        colWidths=[0.34, 0.44, 0.22],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(11)
+    table.scale(1, 1.5)
+    for (row, col), cell in table.get_celld().items():
+        cell.set_edgecolor("#d8dde6")
+        if row == 0:
+            cell.set_facecolor("#4f46e5")
+            cell.set_text_props(color="white", fontweight="bold")
+        elif row == n_rows:  # last data row = TOTAL (header is row 0)
+            cell.set_facecolor("#eef2ff")
+            cell.set_text_props(fontweight="bold")
+
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+                facecolor="white")
+    plt.close(fig)
+    return buf.getvalue()
 
 
 # ---------- Page setup ----------
@@ -801,9 +882,7 @@ if tab_choice == "Calculator":
                 "Reagent": prettify_formula(r.reagent.name) if r.reagent else "—",
                 "Reagent MW": round(r.reagent.mw, 2) if r.reagent else None,
                 "Purity %": round(r.reagent.purity, 2) if r.reagent else None,
-                "Mass target (g)": round(r.mass_target, 4),
-                "Mass + excess (g)": round(r.mass_with_excess, 4),
-                ("w/ purity (g)" if st.session_state.apply_purity else "To weigh (g)"): round(r.mass_to_weigh, 4),
+                ("Weigh w/ purity (g)" if st.session_state.apply_purity else "To weigh (g)"): round(r.mass_to_weigh, 4),
             })
         # Render the table as raw HTML, NOT via st.dataframe / st.table /
         # st.data_editor. All three of those serialize through Apache Arrow
@@ -816,7 +895,7 @@ if tab_choice == "Calculator":
         if result.dopant_rows:
             st.markdown("**Add-on dopants** (weighed in addition to the base batch)")
             dop_rows_data = []
-            mass_col = "w/ purity (g)" if st.session_state.apply_purity else "To weigh (g)"
+            mass_col = "Weigh w/ purity (g)" if st.session_state.apply_purity else "To weigh (g)"
             for d in result.dopant_rows:
                 unit_label = "wt %" if d.unit == UNIT_WT_PCT else "mol %"
                 dop_rows_data.append({
@@ -826,7 +905,6 @@ if tab_choice == "Calculator":
                     "Reagent": prettify_formula(d.reagent.name) if d.reagent else "—",
                     "Reagent MW": round(d.reagent.mw, 2) if d.reagent else None,
                     "Purity %": round(d.reagent.purity, 2) if d.reagent else None,
-                    "Mass (g)": round(d.mass, 4),
                     mass_col: round(d.mass_to_weigh, 4),
                 })
             st.markdown(render_html_table(dop_rows_data), unsafe_allow_html=True)
@@ -908,6 +986,33 @@ if tab_choice == "Calculator":
                 filename=f"{recipe_name or 'recipe'}_{int(datetime.now().timestamp())}.csv",
                 mime="text/csv",
             )
+
+        # ---- Export as image (composition shown as the title) ----
+        st.markdown("")
+        img_c1, img_c2 = st.columns([1, 3])
+        with img_c1:
+            if st.button("🖼️ Make recipe image", use_container_width=True,
+                         disabled=not result.rows):
+                try:
+                    comp_for_img = format_composition(
+                        st.session_state.end_members, st.session_state.dopants)
+                    st.session_state["_recipe_png"] = build_recipe_image(
+                        result, comp_for_img,
+                        st.session_state.batch_size, st.session_state.apply_purity)
+                    st.session_state["_recipe_png_name"] = (
+                        f"{recipe_name or 'recipe'}_{int(datetime.now().timestamp())}.png")
+                except Exception as e:
+                    st.session_state.pop("_recipe_png", None)
+                    st.error(f"Couldn't build the image: {e}")
+        with img_c2:
+            if st.session_state.get("_recipe_png"):
+                st.image(st.session_state["_recipe_png"])
+                download_bytes_link(
+                    "⬇️ Download recipe image (PNG)",
+                    st.session_state["_recipe_png"],
+                    st.session_state.get("_recipe_png_name", "recipe.png"),
+                    "image/png",
+                )
 
 
 # ============================================================

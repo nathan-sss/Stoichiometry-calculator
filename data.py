@@ -69,7 +69,7 @@ DEFAULT_REAGENTS: List[dict] = [
     {"name": "Fe2O3", "element": "Fe", "atoms": 2, "mw": 159.69, "purity": 99.9, "notes": "Iron(III) oxide"},
     {"name": "ZrO2", "element": "Zr", "atoms": 1, "mw": 123.22, "purity": 99.9, "notes": "Zirconium dioxide"},
     {"name": "PbO", "element": "Pb", "atoms": 1, "mw": 223.2, "purity": 99.9, "notes": "Lead(II) oxide"},
-    {"name": "MnO2", "element": "Mn", "atoms": 1, "mw": 86.94, "purity": 99.9, "notes": "Manganese dioxide"},
+    {"name": "Mn2O3", "element": "Mn", "atoms": 2, "mw": 157.87, "purity": 99.9, "notes": "Manganese(III) oxide"},
     {"name": "La2O3", "element": "La", "atoms": 2, "mw": 325.81, "purity": 99.9, "notes": "Lanthanum oxide"},
     {"name": "Y2O3", "element": "Y", "atoms": 2, "mw": 225.81, "purity": 99.9, "notes": "Yttrium oxide"},
     {"name": "Ta2O5", "element": "Ta", "atoms": 2, "mw": 441.89, "purity": 99.9, "notes": "Tantalum pentoxide"},
